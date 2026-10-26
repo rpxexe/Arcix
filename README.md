@@ -4,6 +4,8 @@ AeroDesk is a high-performance, production-oriented remote desktop application i
 
 Built with **Electron 34**, **React 19**, **TypeScript**, **WebRTC (DTLS-SRTP)**, and a native zero-dependency **Win32 Input Injector** compiled in C#.
 
+📖 **Cloud Deployment Guide**: For full instructions on deploying to **Vercel**, **Render**, **Docker**, and packaging the Windows executable, see [**DEPLOYMENT.md**](DEPLOYMENT.md).
+
 ---
 
 ## 🌟 Key Features
