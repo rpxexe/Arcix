@@ -5,3 +5,4 @@ dist-electron
 release
 *.pfx
 *.log
+.env
