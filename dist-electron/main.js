@@ -53,7 +53,10 @@ function startNativeInputInjector() {
     const possiblePaths = [
         path.join(__dirname, '..', 'native-input', 'InputInjector.exe'),
         path.join(process.cwd(), 'native-input', 'InputInjector.exe'),
-        path.join(__dirname, 'native-input', 'InputInjector.exe')
+        path.join(__dirname, 'native-input', 'InputInjector.exe'),
+        path.join(process.resourcesPath, 'native-input', 'InputInjector.exe'),
+        path.join(process.resourcesPath, 'app.asar.unpacked', 'native-input', 'InputInjector.exe'),
+        path.join(electron_1.app.getAppPath(), 'native-input', 'InputInjector.exe')
     ];
     const exePath = possiblePaths.find(p => fs.existsSync(p));
     if (!exePath) {
@@ -120,13 +123,19 @@ function createMainWindow() {
         }
     });
     const devUrl = process.env.VITE_DEV_SERVER_URL || 'http://localhost:5173';
-    if (process.env.NODE_ENV === 'development' || !electron_1.app.isPackaged) {
+    if (process.env.NODE_ENV === 'development' && !electron_1.app.isPackaged) {
         mainWindow.loadURL(devUrl).catch(() => {
             setTimeout(() => mainWindow?.loadURL(devUrl), 1000);
         });
     }
     else {
-        mainWindow.loadFile(path.join(__dirname, '..', 'dist', 'index.html'));
+        const distPath = path.join(electron_1.app.getAppPath(), 'dist', 'index.html');
+        if (fs.existsSync(distPath)) {
+            mainWindow.loadFile(distPath);
+        }
+        else {
+            mainWindow.loadFile(path.join(__dirname, '..', 'dist', 'index.html'));
+        }
     }
     mainWindow.on('closed', () => {
         mainWindow = null;

@@ -3,6 +3,7 @@
   "version": "1.0.0",
   "description": "Production-oriented AnyDesk-style Remote Desktop Application",
   "main": "dist-electron/main.js",
+  "author": "AeroDesk Team",
   "scripts": {
     "dev:server": "node server/index.js",
     "dev:vite": "vite",
@@ -12,7 +13,28 @@
     "dev": "concurrently -k -p \"[{name}]\" -n \"SERVER,VITE,ELECTRON\" -c \"cyan,magenta,green\" \"node server/index.js\" \"vite\" \"node scripts/wait-and-launch-electron.js\"",
     "dev:app": "concurrently -k -p \"[{name}]\" -n \"VITE,ELECTRON\" -c \"magenta,green\" \"vite\" \"node scripts/wait-and-launch-electron.js\"",
     "start": "electron .",
-    "test": "node tests/run-tests.js"
+    "test": "node tests/run-tests.js",
+    "package:exe": "npm run build && electron-builder --win portable"
+  },
+  "build": {
+    "appId": "com.aerodesk.app",
+    "productName": "AeroDesk",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "dist-electron/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "native-input/InputInjector.exe",
+        "to": "native-input/InputInjector.exe"
+      }
+    ],
+    "win": {
+      "target": "portable"
+    }
   },
   "dependencies": {
     "lucide-react": "^1.16.0",
@@ -28,6 +50,7 @@
     "@vitejs/plugin-react": "^4.3.4",
     "concurrently": "^9.1.0",
     "electron": "^34.0.0",
+    "electron-builder": "^25.1.8",
     "typescript": "^5.7.2",
     "vite": "^6.0.0"
   }
