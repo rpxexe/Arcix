@@ -1,0 +1,21 @@
+# Vercel Ignore File
+# Exclude desktop build artifacts, native binaries, and non-web assets from Vercel deployment
+
+release
+release/**
+*.exe
+AnyDesk.exe
+dist-electron
+dist-electron/**
+native-input
+native-input/**
+electron
+electron/**
+tests
+tests/**
+.agents
+.agents/**
+.git
+.git/**
+node_modules
+*.log
