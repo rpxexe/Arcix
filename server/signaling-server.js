@@ -81,6 +81,14 @@ class SignalingServer {
         });
       });
 
+      this.httpServer.on('error', (err) => {
+        if (err.code === 'EADDRINUSE') {
+          console.warn(`[AeroDesk Signaling Server] Warning: Port ${this.port} is already in use.`);
+        } else {
+          console.error(`[AeroDesk Signaling Server] HTTP Server Error:`, err);
+        }
+      });
+
       this.httpServer.listen(this.port, () => {
         console.log(`[AeroDesk Signaling Server] Listening on port ${this.port}`);
         resolve(this.port);

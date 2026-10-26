@@ -10,6 +10,7 @@
     "build:react": "vite build",
     "build": "npm run build:react && npm run build:electron",
     "dev": "concurrently -k -p \"[{name}]\" -n \"SERVER,VITE,ELECTRON\" -c \"cyan,magenta,green\" \"node server/index.js\" \"vite\" \"node scripts/wait-and-launch-electron.js\"",
+    "dev:app": "concurrently -k -p \"[{name}]\" -n \"VITE,ELECTRON\" -c \"magenta,green\" \"vite\" \"node scripts/wait-and-launch-electron.js\"",
     "start": "electron .",
     "test": "node tests/run-tests.js"
   },
