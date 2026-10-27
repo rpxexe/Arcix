@@ -35,6 +35,8 @@ export const App: React.FC = () => {
   // Core Service Instances
   const signalingRef = useRef<SignalingClient | null>(null);
   const webrtcRef = useRef<WebRTCManager | null>(null);
+  const incomingCallRef = useRef<IncomingCallData | null>(null);
+  incomingCallRef.current = incomingCall;
 
   // Initialize Services
   useEffect(() => {
@@ -67,6 +69,8 @@ export const App: React.FC = () => {
       onIncomingCall: (call) => {
         setIncomingCall(call);
         setConnectionState('ringing');
+        // Trigger always-on-top popover and unminimize window if minimized
+        window.aeroDeskApi?.notifyIncomingCall(call);
       },
 
       onCallAccepted: async (hostId, hostName, grantedPermissions) => {
@@ -169,11 +173,22 @@ export const App: React.FC = () => {
       handleDisconnect(true);
     });
 
+    // Listen for Popover Decisions (from always-on-top approval popover window)
+    const cleanupPopover = window.aeroDeskApi?.onPopoverDecision(({ accepted, permissions }) => {
+      console.log('[App] Received approval decision from popover:', accepted);
+      if (accepted) {
+        handleAcceptIncomingCall(permissions);
+      } else {
+        handleRejectIncomingCall('Connection declined by host user');
+      }
+    });
+
     signaling.connect();
 
     return () => {
       cleanupRevoke?.();
       cleanupDisconnect?.();
+      cleanupPopover?.();
       signaling.disconnect();
       webrtc.close();
     };
@@ -220,10 +235,15 @@ export const App: React.FC = () => {
     signalingRef.current.callRemoteDevice(targetId, perms);
   };
 
-  const handleAcceptIncomingCall = async (grantedPermissions: SessionPermissions) => {
-    if (!incomingCall || !signalingRef.current || !webrtcRef.current) return;
-    const callerId = incomingCall.callerId;
-    const callerName = incomingCall.callerName;
+  const handleAcceptIncomingCall = async (grantedPermissions?: SessionPermissions) => {
+    const call = incomingCallRef.current || incomingCall;
+    if (!call || !signalingRef.current || !webrtcRef.current) return;
+    const callerId = call.callerId;
+    const callerName = call.callerName;
+    const permissions = grantedPermissions || call.requestedPermissions;
+
+    // Close any active approval popover window
+    window.aeroDeskApi?.closeIncomingCallPopover();
 
     setIncomingCall(null);
     setConnectionState('connected');
@@ -232,7 +252,7 @@ export const App: React.FC = () => {
       peerId: callerId,
       peerName: callerName,
       role: 'host',
-      permissions: grantedPermissions,
+      permissions,
       startTime: Date.now(),
       durationSeconds: 0,
       quality: 'balanced',
@@ -244,13 +264,13 @@ export const App: React.FC = () => {
     });
 
     // Accept via signaling
-    signalingRef.current.respondToIncomingCall(callerId, true, grantedPermissions);
+    signalingRef.current.respondToIncomingCall(callerId, true, permissions);
 
     // Show host indicator floating overlay window
     window.aeroDeskApi?.showHostOverlay({
       peerId: callerId,
       peerName: callerName,
-      permissions: grantedPermissions
+      permissions
     });
 
     // Append audit log
@@ -259,17 +279,22 @@ export const App: React.FC = () => {
       type: 'incoming_connection',
       peerId: callerId,
       peerName: callerName,
-      permissions: grantedPermissions,
+      permissions,
       status: 'accepted'
     });
 
     // Start WebRTC as host (captures screen)
-    await webrtcRef.current.startAsHost(callerId, grantedPermissions);
+    await webrtcRef.current.startAsHost(callerId, permissions);
   };
 
   const handleRejectIncomingCall = (reason?: string) => {
-    if (!incomingCall || !signalingRef.current) return;
-    signalingRef.current.respondToIncomingCall(incomingCall.callerId, false, {
+    const call = incomingCallRef.current || incomingCall;
+    if (!call || !signalingRef.current) return;
+
+    // Close any active approval popover window
+    window.aeroDeskApi?.closeIncomingCallPopover();
+
+    signalingRef.current.respondToIncomingCall(call.callerId, false, {
       view: false,
       input: false,
       clipboard: false,
@@ -279,8 +304,8 @@ export const App: React.FC = () => {
     window.aeroDeskApi?.appendAuditLog({
       timestamp: new Date().toISOString(),
       type: 'incoming_connection',
-      peerId: incomingCall.callerId,
-      peerName: incomingCall.callerName,
+      peerId: call.callerId,
+      peerName: call.callerName,
       status: 'rejected'
     });
 

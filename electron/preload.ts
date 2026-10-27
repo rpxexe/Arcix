@@ -100,6 +100,25 @@ const aeroDeskApi = {
     const listener = () => callback();
     ipcRenderer.on('session:host-disconnect', listener);
     return () => ipcRenderer.removeListener('session:host-disconnect', listener);
+  },
+
+  // Incoming Call Popover & Notifications
+  notifyIncomingCall: (callData: any): Promise<boolean> => {
+    return ipcRenderer.invoke('incoming-call:notify', callData);
+  },
+
+  closeIncomingCallPopover: (): Promise<boolean> => {
+    return ipcRenderer.invoke('incoming-call:close-popover');
+  },
+
+  respondFromPopover: (accepted: boolean, permissions?: any): Promise<boolean> => {
+    return ipcRenderer.invoke('incoming-call:popover-response', accepted, permissions);
+  },
+
+  onPopoverDecision: (callback: (data: { accepted: boolean; permissions?: any }) => void) => {
+    const listener = (_: any, data: any) => callback(data);
+    ipcRenderer.on('session:popover-decision', listener);
+    return () => ipcRenderer.removeListener('session:popover-decision', listener);
   }
 };
 

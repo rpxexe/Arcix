@@ -12,7 +12,9 @@ import {
   Activity,
   Lock,
   Clock,
-  Laptop
+  Laptop,
+  Minimize2,
+  Maximize2
 } from 'lucide-react';
 import { ActiveSessionState } from '../types';
 import { WebRTCManager } from '../services/webrtc-manager';
@@ -34,6 +36,7 @@ export const HostSessionView: React.FC<HostSessionViewProps> = ({
 }) => {
   const [duration, setDuration] = useState(session.durationSeconds || 0);
   const [inputAllowed, setInputAllowed] = useState(session.permissions.input);
+  const [isCollapsed, setIsCollapsed] = useState(false);
 
   // Live timer
   useEffect(() => {
@@ -78,62 +81,167 @@ export const HostSessionView: React.FC<HostSessionViewProps> = ({
       background: 'radial-gradient(circle at 50% 20%, rgba(6, 182, 212, 0.08) 0%, rgba(13, 17, 23, 1) 75%)',
       overflowY: 'auto'
     }}>
-      <div style={{
-        maxWidth: 720,
-        width: '100%',
-        background: 'rgba(21, 27, 35, 0.85)',
-        backdropFilter: 'blur(20px)',
-        border: '1px solid rgba(255, 255, 255, 0.08)',
-        borderRadius: 16,
-        padding: 32,
-        boxShadow: '0 20px 50px rgba(0, 0, 0, 0.6), 0 0 30px rgba(6, 182, 212, 0.1)'
-      }}>
-        {/* Header Status */}
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 24, borderBottom: '1px solid var(--border-subtle)', paddingBottom: 20 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
-            <div style={{
-              width: 48,
-              height: 48,
-              borderRadius: 12,
-              background: 'linear-gradient(135deg, rgba(239, 68, 68, 0.2) 0%, rgba(245, 158, 11, 0.2) 100%)',
-              border: '1px solid rgba(239, 68, 68, 0.4)',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              color: '#ef4444',
-              boxShadow: '0 0 16px rgba(239, 68, 68, 0.3)'
-            }}>
-              <Monitor size={24} strokeWidth={2.2} />
-            </div>
+      {isCollapsed ? (
+        /* Collapsed Compact Floating Card */
+        <div
+          id="host-session-card-collapsed"
+          style={{
+            background: 'rgba(21, 27, 35, 0.95)',
+            backdropFilter: 'blur(20px)',
+            border: '1px solid rgba(239, 68, 68, 0.4)',
+            borderRadius: 14,
+            padding: '14px 24px',
+            boxShadow: '0 10px 30px rgba(0, 0, 0, 0.7), 0 0 20px rgba(239, 68, 68, 0.2)',
+            display: 'flex',
+            alignItems: 'center',
+            gap: 20,
+            maxWidth: 680,
+            width: '100%',
+            justifyContent: 'space-between',
+            userSelect: 'none'
+          }}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+            <span className="online-pulse" style={{ background: '#ef4444' }} />
             <div>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                <span className="online-pulse" style={{ background: '#ef4444' }} />
-                <h2 style={{ fontSize: 18, fontWeight: 700, color: '#fff', margin: 0 }}>
-                  Screen Sharing Active
-                </h2>
+              <div style={{ fontSize: 13, fontWeight: 700, color: '#fff', display: 'flex', alignItems: 'center', gap: 8 }}>
+                <span>Screen Sharing</span>
+                <span style={{ color: '#38bdf8', fontFamily: 'var(--font-mono)' }}>{session.peerId}</span>
               </div>
-              <p style={{ fontSize: 13, color: 'var(--text-muted)', margin: '4px 0 0 0' }}>
-                Your desktop is currently being viewed by a remote authorized operator.
-              </p>
+              <div style={{ fontSize: 11, color: 'var(--text-dim)', marginTop: 2 }}>
+                {session.peerName || 'Remote Client'} • {formatTime(duration)}
+              </div>
             </div>
           </div>
 
-          <div style={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: 6,
-            background: 'rgba(255, 255, 255, 0.05)',
-            border: '1px solid var(--border-subtle)',
-            borderRadius: 8,
-            padding: '6px 14px',
-            fontSize: 13,
-            color: '#fff',
-            fontFamily: 'var(--font-mono)'
-          }}>
-            <Clock size={15} color="var(--accent-cyan)" />
-            <span>{formatTime(duration)}</span>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <button
+              onClick={handleToggleInput}
+              style={{
+                padding: '6px 12px',
+                borderRadius: 6,
+                fontSize: 12,
+                fontWeight: 600,
+                cursor: 'pointer',
+                background: inputAllowed ? 'rgba(239, 68, 68, 0.15)' : 'rgba(16, 185, 129, 0.2)',
+                color: inputAllowed ? '#f87171' : '#10b981',
+                border: inputAllowed ? '1px solid rgba(239, 68, 68, 0.4)' : '1px solid #10b981'
+              }}
+            >
+              {inputAllowed ? 'Revoke Input' : 'Grant Input'}
+            </button>
+
+            <button
+              onClick={onDisconnect}
+              className="btn-danger"
+              style={{ padding: '6px 14px', fontSize: 12 }}
+            >
+              Disconnect
+            </button>
+
+            <button
+              onClick={() => setIsCollapsed(false)}
+              id="expand-host-dashboard-btn"
+              title="Expand Controls Dashboard"
+              style={{
+                background: 'rgba(255, 255, 255, 0.05)',
+                border: '1px solid var(--border-subtle)',
+                color: '#38bdf8',
+                padding: '6px 10px',
+                borderRadius: 6,
+                cursor: 'pointer',
+                display: 'flex',
+                alignItems: 'center',
+                gap: 4,
+                fontSize: 12
+              }}
+            >
+              <Maximize2 size={13} />
+              <span>Expand</span>
+            </button>
           </div>
         </div>
+      ) : (
+        /* Expanded Full Dashboard Card */
+        <div style={{
+          maxWidth: 720,
+          width: '100%',
+          background: 'rgba(21, 27, 35, 0.85)',
+          backdropFilter: 'blur(20px)',
+          border: '1px solid rgba(255, 255, 255, 0.08)',
+          borderRadius: 16,
+          padding: 32,
+          boxShadow: '0 20px 50px rgba(0, 0, 0, 0.6), 0 0 30px rgba(6, 182, 212, 0.1)'
+        }}>
+          {/* Header Status */}
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 24, borderBottom: '1px solid var(--border-subtle)', paddingBottom: 20 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
+              <div style={{
+                width: 48,
+                height: 48,
+                borderRadius: 12,
+                background: 'linear-gradient(135deg, rgba(239, 68, 68, 0.2) 0%, rgba(245, 158, 11, 0.2) 100%)',
+                border: '1px solid rgba(239, 68, 68, 0.4)',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                color: '#ef4444',
+                boxShadow: '0 0 16px rgba(239, 68, 68, 0.3)'
+              }}>
+                <Monitor size={24} strokeWidth={2.2} />
+              </div>
+              <div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <span className="online-pulse" style={{ background: '#ef4444' }} />
+                  <h2 style={{ fontSize: 18, fontWeight: 700, color: '#fff', margin: 0 }}>
+                    Screen Sharing Active
+                  </h2>
+                </div>
+                <p style={{ fontSize: 13, color: 'var(--text-muted)', margin: '4px 0 0 0' }}>
+                  Your desktop is currently being viewed by a remote authorized operator.
+                </p>
+              </div>
+            </div>
+
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <div style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 6,
+                background: 'rgba(255, 255, 255, 0.05)',
+                border: '1px solid var(--border-subtle)',
+                borderRadius: 8,
+                padding: '6px 14px',
+                fontSize: 13,
+                color: '#fff',
+                fontFamily: 'var(--font-mono)'
+              }}>
+                <Clock size={15} color="var(--accent-cyan)" />
+                <span>{formatTime(duration)}</span>
+              </div>
+
+              <button
+                onClick={() => setIsCollapsed(true)}
+                id="collapse-host-dashboard-btn"
+                title="Minimize to Compact View"
+                style={{
+                  background: 'rgba(255, 255, 255, 0.05)',
+                  border: '1px solid var(--border-subtle)',
+                  borderRadius: 8,
+                  padding: '6px 10px',
+                  color: 'var(--text-dim)',
+                  cursor: 'pointer',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 4,
+                  fontSize: 12
+                }}
+              >
+                <Minimize2 size={13} />
+                <span>Minimize</span>
+              </button>
+            </div>
+          </div>
 
         {/* Remote Peer & Connection Details Grid */}
         <div style={{
@@ -326,6 +434,7 @@ export const HostSessionView: React.FC<HostSessionViewProps> = ({
           </span>
         </div>
       </div>
+      )}
     </div>
   );
 };

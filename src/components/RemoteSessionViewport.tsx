@@ -12,7 +12,9 @@ import {
   Activity,
   Layers,
   Check,
-  AlertCircle
+  AlertCircle,
+  ChevronUp,
+  ChevronDown
 } from 'lucide-react';
 import { ActiveSessionData, QualityPreset, RemoteInputEvent } from '../types';
 import { WebRTCManager } from '../services/webrtc-manager';
@@ -41,13 +43,25 @@ export const RemoteSessionViewport: React.FC<RemoteSessionViewportProps> = ({
   // Floating ribbon minimized/expanded
   const [ribbonOpen, setRibbonOpen] = useState(true);
 
-  // Bind video element to remote stream
+  // Bind video element to remote stream with instant fallback and autoplay
   useEffect(() => {
+    const attachStream = (stream: MediaStream) => {
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+        videoRef.current.play().catch((err) => {
+          console.warn('[RemoteSessionViewport] Autoplay interrupted:', err);
+        });
+      }
+    };
+
+    const existingStream = webrtc.getRemoteStream();
+    if (existingStream) {
+      attachStream(existingStream);
+    }
+
     webrtc.setEvents({
       onRemoteStream: (stream) => {
-        if (videoRef.current) {
-          videoRef.current.srcObject = stream;
-        }
+        attachStream(stream);
       }
     });
   }, [webrtc]);
@@ -207,9 +221,10 @@ export const RemoteSessionViewport: React.FC<RemoteSessionViewportProps> = ({
         justifyContent: 'center'
       }}
     >
-      {/* Top Floating Control Ribbon */}
-      <div
-        id="session-control-ribbon"
+      {/* Top Floating Control Ribbon (Collapsible) */}
+      {ribbonOpen ? (
+        <div
+          id="session-control-ribbon"
         style={{
           position: 'absolute',
           top: 12,
@@ -385,13 +400,69 @@ export const RemoteSessionViewport: React.FC<RemoteSessionViewportProps> = ({
           <PhoneOff size={14} />
           Disconnect
         </button>
+
+        <div style={{ height: 20, width: 1, background: 'var(--border-subtle)' }} />
+
+        {/* Collapse Ribbon Button */}
+        <button
+          onClick={() => setRibbonOpen(false)}
+          id="collapse-ribbon-btn"
+          title="Hide Control Ribbon"
+          style={{
+            background: 'transparent',
+            border: 'none',
+            color: 'var(--text-dim)',
+            cursor: 'pointer',
+            display: 'flex',
+            alignItems: 'center',
+            padding: '4px',
+            borderRadius: 4
+          }}
+        >
+          <ChevronUp size={16} />
+        </button>
       </div>
+      ) : (
+        /* Collapsed Mini Tab / Pill */
+        <div
+          id="session-control-ribbon-collapsed"
+          onClick={() => setRibbonOpen(true)}
+          title="Click to expand control ribbon"
+          style={{
+            position: 'absolute',
+            top: 8,
+            left: '50%',
+            transform: 'translateX(-50%)',
+            zIndex: 100,
+            background: 'rgba(15, 23, 42, 0.92)',
+            backdropFilter: 'blur(12px)',
+            border: '1px solid var(--border-subtle)',
+            borderRadius: 20,
+            padding: '4px 12px',
+            display: 'flex',
+            alignItems: 'center',
+            gap: 8,
+            boxShadow: '0 4px 20px rgba(0, 0, 0, 0.5)',
+            cursor: 'pointer',
+            userSelect: 'none',
+            fontSize: 12,
+            color: '#e2e8f0',
+            transition: 'all 0.2s ease'
+          }}
+        >
+          <div className="online-pulse" style={{ background: '#10b981', width: 6, height: 6 }} />
+          <span style={{ fontFamily: 'var(--font-mono)', fontWeight: 600 }}>{session.peerId}</span>
+          <span style={{ color: 'var(--text-dim)', fontSize: 11 }}>{formatDuration(session.durationSeconds)}</span>
+          <ChevronDown size={14} color="#38bdf8" />
+        </div>
+      )}
 
       {/* Main Remote Desktop Canvas / Video */}
       <video
         ref={videoRef}
         autoPlay
         playsInline
+        muted
         id="remote-desktop-video"
         onMouseMove={handleMouseMove}
         onMouseDown={handleMouseDown}

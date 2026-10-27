@@ -43,8 +43,15 @@ export class WebRTCManager {
     receivedChunks: Map<number, Uint8Array>;
   } | null = null;
 
+  // ICE candidates arriving before remote description is set
+  private pendingCandidates: RTCIceCandidateInit[] = [];
+
   constructor(signaling: SignalingClient) {
     this.signaling = signaling;
+  }
+
+  public getRemoteStream(): MediaStream | null {
+    return this.remoteStream;
   }
 
   public setEvents(events: WebRTCEvents) {
@@ -65,11 +72,13 @@ export class WebRTCManager {
     // Setup screen capture stream
     try {
       this.localStream = await this.acquireScreenStream(sourceId);
+      console.log('[WebRTC Host] Acquired screen stream, track count:', this.localStream.getTracks().length);
       this.localStream.getTracks().forEach((track) => {
         this.pc?.addTrack(track, this.localStream!);
       });
     } catch (err) {
       console.error('[WebRTC Host] Failed to capture screen:', err);
+      throw err;
     }
 
     // Host listens for data channels created by viewer
@@ -104,8 +113,15 @@ export class WebRTCManager {
     this.remoteStream = new MediaStream();
     this.pc!.ontrack = (event) => {
       console.log('[WebRTC Viewer] Received remote video track:', event.track.kind);
-      this.remoteStream?.addTrack(event.track);
-      this.events.onRemoteStream?.(this.remoteStream!);
+      if (event.streams && event.streams[0]) {
+        this.remoteStream = event.streams[0];
+      } else {
+        if (!this.remoteStream) {
+          this.remoteStream = new MediaStream();
+        }
+        this.remoteStream.addTrack(event.track);
+      }
+      this.events.onRemoteStream?.(this.remoteStream);
     };
 
     // Viewer initiates the WebRTC offer
@@ -145,6 +161,7 @@ export class WebRTCManager {
   public async handleRemoteOffer(offer: RTCSessionDescriptionInit): Promise<void> {
     if (!this.pc) return;
     await this.pc.setRemoteDescription(new RTCSessionDescription(offer));
+    await this.drainPendingCandidates();
     const answer = await this.pc.createAnswer();
     await this.pc.setLocalDescription(answer);
     this.signaling.sendWebRTCAnswer(this.peerId, answer);
@@ -153,14 +170,35 @@ export class WebRTCManager {
   public async handleRemoteAnswer(answer: RTCSessionDescriptionInit): Promise<void> {
     if (!this.pc) return;
     await this.pc.setRemoteDescription(new RTCSessionDescription(answer));
+    await this.drainPendingCandidates();
   }
 
   public async handleRemoteIceCandidate(candidate: RTCIceCandidateInit): Promise<void> {
     if (!this.pc) return;
+    if (!this.pc.remoteDescription || !this.pc.remoteDescription.type) {
+      console.log('[WebRTC] Queuing ICE candidate until remote description is set');
+      this.pendingCandidates.push(candidate);
+      return;
+    }
+
     try {
       await this.pc.addIceCandidate(new RTCIceCandidate(candidate));
     } catch (err) {
       console.warn('[WebRTC] Failed to add ICE candidate', err);
+    }
+  }
+
+  private async drainPendingCandidates(): Promise<void> {
+    if (!this.pc) return;
+    while (this.pendingCandidates.length > 0) {
+      const candidate = this.pendingCandidates.shift();
+      if (candidate) {
+        try {
+          await this.pc.addIceCandidate(new RTCIceCandidate(candidate));
+        } catch (err) {
+          console.warn('[WebRTC] Failed to add drained candidate', err);
+        }
+      }
     }
   }
 
@@ -310,31 +348,46 @@ export class WebRTCManager {
 
   private async acquireScreenStream(preferredSourceId?: string): Promise<MediaStream> {
     if (window.aeroDeskApi) {
-      const sources = await window.aeroDeskApi.getDesktopSources();
-      const targetSource = preferredSourceId
-        ? sources.find(s => s.id === preferredSourceId)
-        : sources.find(s => s.id.startsWith('screen:')) || sources[0];
+      try {
+        const sources = await window.aeroDeskApi.getDesktopSources();
+        console.log('[WebRTC Host] Available desktop sources:', sources.map(s => ({ id: s.id, name: s.name })));
+        const targetSource = preferredSourceId
+          ? sources.find(s => s.id === preferredSourceId)
+          : sources.find(s => s.id.startsWith('screen:')) || sources[0];
 
-      const constraints: any = {
-        audio: false,
-        video: {
-          mandatory: {
-            chromeMediaSource: 'desktop',
-            chromeMediaSourceId: targetSource?.id || 'screen:0:0',
-            minWidth: 1280,
-            maxWidth: 1920,
-            minHeight: 720,
-            maxHeight: 1080,
-            minFrameRate: 30,
-            maxFrameRate: 60
+        if (targetSource) {
+          try {
+            return await (navigator.mediaDevices as any).getUserMedia({
+              audio: false,
+              video: {
+                mandatory: {
+                  chromeMediaSource: 'desktop',
+                  chromeMediaSourceId: targetSource.id,
+                  maxWidth: 1920,
+                  maxHeight: 1080,
+                  maxFrameRate: 60
+                }
+              }
+            });
+          } catch (resErr) {
+            console.warn('[WebRTC Host] Optimal screen capture failed, retrying minimal constraints:', resErr);
+            return await (navigator.mediaDevices as any).getUserMedia({
+              audio: false,
+              video: {
+                mandatory: {
+                  chromeMediaSource: 'desktop',
+                  chromeMediaSourceId: targetSource.id
+                }
+              }
+            });
           }
         }
-      };
-
-      return await (navigator.mediaDevices as any).getUserMedia(constraints);
+      } catch (electronErr) {
+        console.warn('[WebRTC Host] DesktopCapturer getUserMedia failed, attempting getDisplayMedia fallback:', electronErr);
+      }
     }
 
-    // Browser standard fallback
+    // Standard fallback (getDisplayMedia)
     return await navigator.mediaDevices.getDisplayMedia({
       video: { frameRate: { ideal: 60 } },
       audio: false
@@ -427,5 +480,6 @@ export class WebRTCManager {
       this.pc = null;
     }
     this.remoteStream = null;
+    this.pendingCandidates = [];
   }
 }
