@@ -16,6 +16,7 @@ import {
 } from 'lucide-react';
 import { AuditLogEntry } from '../../electron/preload';
 import { getSignalingUrl, getDefaultSignalingUrl, saveSignalingUrl } from '../services/config';
+import { saveUnattendedPassword } from '../services/unattended';
 
 interface SettingsModalProps {
   onClose: () => void;
@@ -50,14 +51,14 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ onClose }) => {
     }
   }, []);
 
-  const handleSaveSecurity = () => {
+  const handleSaveSecurity = async () => {
     localStorage.setItem('aerodesk_require_consent', requireConsent.toString());
     localStorage.setItem('aerodesk_unattended_enabled', unattendedEnabled.toString());
     saveSignalingUrl(serverUrl);
 
     if (unattendedPassword) {
-      // In a real app we salt and hash before storing
-      localStorage.setItem('aerodesk_unattended_hash', btoa(unattendedPassword));
+      await saveUnattendedPassword(unattendedPassword);
+      setUnattendedPassword('');
     }
 
     setPasswordSaved(true);

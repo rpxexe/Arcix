@@ -218,7 +218,9 @@ class SignalingServer {
         input: true,
         clipboard: true,
         fileTransfer: true
-      }
+      },
+      // shortcut: password transits this server (over wss in prod); switch to challenge-response if the server isn't trusted
+      password: typeof msg.password === 'string' ? msg.password.slice(0, 256) : undefined
     });
 
     this.send(ws, {

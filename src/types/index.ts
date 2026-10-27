@@ -41,6 +41,7 @@ export interface IncomingCallData {
   callerId: string;
   callerName: string;
   requestedPermissions: SessionPermissions;
+  password?: string;
 }
 
 export interface ActiveSessionData {

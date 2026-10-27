@@ -34,6 +34,11 @@ export const RemoteSessionViewport: React.FC<RemoteSessionViewportProps> = ({
 }) => {
   const videoRef = useRef<HTMLVideoElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  const pendingMoveRef = useRef<RemoteInputEvent | null>(null);
+  const moveFrameRef = useRef<number | null>(null);
+  // Held keys/buttons, released on blur so alt-tab doesn't leave them stuck down on the host
+  const heldKeysRef = useRef(new Set<number>());
+  const heldButtonsRef = useRef(new Set<'left' | 'right' | 'middle'>());
 
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [fitToWindow, setFitToWindow] = useState(true);
@@ -46,7 +51,8 @@ export const RemoteSessionViewport: React.FC<RemoteSessionViewportProps> = ({
   // Bind video element to remote stream with instant fallback and autoplay
   useEffect(() => {
     const attachStream = (stream: MediaStream) => {
-      if (videoRef.current) {
+      // Re-assigning the same stream restarts loading and aborts the pending play()
+      if (videoRef.current && videoRef.current.srcObject !== stream) {
         videoRef.current.srcObject = stream;
         videoRef.current.play().catch((err) => {
           console.warn('[RemoteSessionViewport] Autoplay interrupted:', err);
@@ -92,28 +98,37 @@ export const RemoteSessionViewport: React.FC<RemoteSessionViewportProps> = ({
     const videoWidth = videoRef.current.videoWidth || 1920;
     const videoHeight = videoRef.current.videoHeight || 1080;
 
-    // Calculate normalized pointer position within the actual video area
-    const clientX = e.clientX - rect.left;
-    const clientY = e.clientY - rect.top;
+    // Map into the rendered picture, excluding object-fit letterbox bars (centered by default)
+    const scale = Math.min(rect.width / videoWidth, rect.height / videoHeight);
+    const offsetX = (rect.width - videoWidth * scale) / 2;
+    const offsetY = (rect.height - videoHeight * scale) / 2;
+    const hostX = Math.min(videoWidth - 1, Math.max(0, Math.round((e.clientX - rect.left - offsetX) / scale)));
+    const hostY = Math.min(videoHeight - 1, Math.max(0, Math.round((e.clientY - rect.top - offsetY) / scale)));
 
-    const scaleX = videoWidth / rect.width;
-    const scaleY = videoHeight / rect.height;
+    // Leading-edge throttle to ~60 moves/s: the first move goes out immediately (no added latency),
+    // moves within the next 16 ms collapse into one. A timer, not rAF: rAF pauses while the window isn't painted.
+    pendingMoveRef.current = { type: 'mouse_move', x: hostX, y: hostY, screen_w: videoWidth, screen_h: videoHeight };
+    if (moveFrameRef.current === null) {
+      flushMouseMove();
+      moveFrameRef.current = window.setTimeout(() => {
+        moveFrameRef.current = null;
+        flushMouseMove();
+      }, 16);
+    }
+  };
 
-    const hostX = Math.round(clientX * scaleX);
-    const hostY = Math.round(clientY * scaleY);
-
-    webrtc.sendInputEvent({
-      type: 'mouse_move',
-      x: hostX,
-      y: hostY,
-      screen_w: videoWidth,
-      screen_h: videoHeight
-    });
+  const flushMouseMove = () => {
+    if (pendingMoveRef.current) {
+      webrtc.sendInputEvent(pendingMoveRef.current);
+      pendingMoveRef.current = null;
+    }
   };
 
   const handleMouseDown = (e: React.MouseEvent<HTMLVideoElement>) => {
     if (!isInputEnabled || session.role !== 'viewer') return;
     const button = e.button === 2 ? 'right' : e.button === 1 ? 'middle' : 'left';
+    flushMouseMove();
+    heldButtonsRef.current.add(button);
     webrtc.sendInputEvent({
       type: 'mouse_down',
       button
@@ -123,6 +138,8 @@ export const RemoteSessionViewport: React.FC<RemoteSessionViewportProps> = ({
   const handleMouseUp = (e: React.MouseEvent<HTMLVideoElement>) => {
     if (!isInputEnabled || session.role !== 'viewer') return;
     const button = e.button === 2 ? 'right' : e.button === 1 ? 'middle' : 'left';
+    flushMouseMove();
+    heldButtonsRef.current.delete(button);
     webrtc.sendInputEvent({
       type: 'mouse_up',
       button
@@ -155,6 +172,7 @@ export const RemoteSessionViewport: React.FC<RemoteSessionViewportProps> = ({
         return;
       }
 
+      heldKeysRef.current.add(e.keyCode);
       webrtc.sendInputEvent({
         type: 'key_down',
         vk: e.keyCode
@@ -165,17 +183,29 @@ export const RemoteSessionViewport: React.FC<RemoteSessionViewportProps> = ({
       if (!isInputEnabled || session.role !== 'viewer') return;
       if (['INPUT', 'TEXTAREA'].includes((e.target as HTMLElement)?.tagName)) return;
 
+      heldKeysRef.current.delete(e.keyCode);
       webrtc.sendInputEvent({
         type: 'key_up',
         vk: e.keyCode
       });
     };
 
+    const releaseAll = () => {
+      heldKeysRef.current.forEach((vk) => webrtc.sendInputEvent({ type: 'key_up', vk }));
+      heldButtonsRef.current.forEach((button) => webrtc.sendInputEvent({ type: 'mouse_up', button }));
+      heldKeysRef.current.clear();
+      heldButtonsRef.current.clear();
+    };
+
     window.addEventListener('keydown', handleKeyDown);
     window.addEventListener('keyup', handleKeyUp);
+    window.addEventListener('blur', releaseAll);
     return () => {
+      releaseAll();
       window.removeEventListener('keydown', handleKeyDown);
       window.removeEventListener('keyup', handleKeyUp);
+      window.removeEventListener('blur', releaseAll);
+      if (moveFrameRef.current !== null) clearTimeout(moveFrameRef.current);
     };
   }, [isInputEnabled, session.role, webrtc]);
 
@@ -189,11 +219,8 @@ export const RemoteSessionViewport: React.FC<RemoteSessionViewportProps> = ({
         text = await navigator.clipboard.readText();
       }
 
-      if (text) {
-        webrtc.sendClipboardText(text);
-        setClipboardStatus('Clipboard synced!');
-        setTimeout(() => setClipboardStatus(null), 2000);
-      }
+      setClipboardStatus(!text ? 'Clipboard is empty' : webrtc.sendClipboardText(text) ? 'Clipboard synced!' : 'Not connected yet');
+      setTimeout(() => setClipboardStatus(null), 2000);
     } catch (err) {
       setClipboardStatus('Clipboard access denied');
       setTimeout(() => setClipboardStatus(null), 2000);
@@ -473,7 +500,8 @@ export const RemoteSessionViewport: React.FC<RemoteSessionViewportProps> = ({
           width: fitToWindow ? '100%' : 'auto',
           height: fitToWindow ? '100%' : 'auto',
           objectFit: fitToWindow ? 'contain' : 'none',
-          cursor: 'default',
+          // While controlling, the host's cursor in the video is the cursor; hide ours so only one shows
+          cursor: isInputEnabled ? 'none' : 'default',
           backgroundColor: '#05070a'
         }}
       />
