@@ -2,6 +2,10 @@
 import { QualityPreset, RemoteInputEvent, SessionPermissions } from '../types';
 import { SignalingClient } from './signaling-client';
 
+const CHUNK_SIZE = 64 * 1024; // binary file chunks; well under Chromium's 256 KB message limit
+const BUFFER_HIGH_WATER = 4 * 1024 * 1024;
+const MAX_FILE_BYTES = 100 * 1024 * 1024;
+
 export interface WebRTCStats {
   rttMs: number;
   fps: number;
@@ -39,12 +43,14 @@ export class WebRTCManager {
   private incomingFile: {
     fileName: string;
     fileSize: number;
-    totalChunks: number;
-    receivedChunks: Map<number, Uint8Array>;
+    receivedBytes: number;
+    parts: ArrayBuffer[];
   } | null = null;
 
   // ICE candidates arriving before remote description is set
   private pendingCandidates: RTCIceCandidateInit[] = [];
+  private hostReady: Promise<void> | null = null;
+  private quality: QualityPreset = 'balanced';
 
   constructor(signaling: SignalingClient) {
     this.signaling = signaling;
@@ -69,37 +75,41 @@ export class WebRTCManager {
 
     this.createPeerConnection();
 
-    // Setup screen capture stream
-    try {
-      this.localStream = await this.acquireScreenStream(sourceId);
-      console.log('[WebRTC Host] Acquired screen stream, track count:', this.localStream.getTracks().length);
-      this.localStream.getTracks().forEach((track) => {
-        this.pc?.addTrack(track, this.localStream!);
-      });
-    } catch (err) {
-      console.error('[WebRTC Host] Failed to capture screen:', err);
-      throw err;
-    }
-
     // Host listens for data channels created by viewer
     this.pc!.ondatachannel = (event) => {
       this.setupDataChannel(event.channel);
     };
 
+    // Setup screen capture stream; the viewer's offer waits on this so the answer includes the video track
+    this.hostReady = (async () => {
+      this.localStream = await this.acquireScreenStream(sourceId);
+      console.log('[WebRTC Host] Acquired screen stream, track count:', this.localStream.getTracks().length);
+      this.localStream.getTracks().forEach((track) => {
+        this.pc?.addTrack(track, this.localStream!);
+      });
+    })();
+
+    try {
+      await this.hostReady;
+    } catch (err) {
+      console.error('[WebRTC Host] Failed to capture screen:', err);
+      throw err;
+    }
+
     this.startStatsMonitoring();
   }
 
-  public async startAsViewer(hostId: string, permissions: SessionPermissions): Promise<void> {
+  public async startAsViewer(hostId: string, permissions: SessionPermissions, quality: QualityPreset = 'balanced'): Promise<void> {
     this.role = 'viewer';
+    this.quality = quality;
     this.peerId = hostId;
     this.permissions = permissions;
 
     this.createPeerConnection();
 
-    // Viewer creates ultra-low latency unordered input channel
+    // Input must be reliable and ordered: a dropped mouse_up/key_up leaves buttons or keys stuck on the host
     this.inputChannel = this.pc!.createDataChannel('input', {
-      ordered: false,
-      maxRetransmits: 0
+      ordered: true
     });
     this.setupDataChannel(this.inputChannel);
 
@@ -113,6 +123,8 @@ export class WebRTCManager {
     this.remoteStream = new MediaStream();
     this.pc!.ontrack = (event) => {
       console.log('[WebRTC Viewer] Received remote video track:', event.track.kind);
+      // Remote control: show frames as soon as they decode instead of buffering for smoothness
+      event.receiver.jitterBufferTarget = 0;
       if (event.streams && event.streams[0]) {
         this.remoteStream = event.streams[0];
       } else {
@@ -160,6 +172,8 @@ export class WebRTCManager {
 
   public async handleRemoteOffer(offer: RTCSessionDescriptionInit): Promise<void> {
     if (!this.pc) return;
+    await this.hostReady;
+    if (!this.pc) return; // closed while capturing
     await this.pc.setRemoteDescription(new RTCSessionDescription(offer));
     await this.drainPendingCandidates();
     const answer = await this.pc.createAnswer();
@@ -210,10 +224,15 @@ export class WebRTCManager {
     }
 
     channel.onopen = () => {
+      // Viewer picks quality, host owns the encoder: tell it once the control channel is up
+      if (channel.label === 'control' && this.role === 'viewer') {
+        channel.send(JSON.stringify({ type: 'quality_preset', preset: this.quality }));
+      }
       console.log(`[DataChannel] Channel '${channel.label}' opened`);
       this.events.onDataChannelReady?.();
     };
 
+    channel.binaryType = 'arraybuffer';
     channel.onmessage = (event) => {
       this.handleChannelMessage(channel.label, event.data);
     };
@@ -250,38 +269,50 @@ export class WebRTCManager {
         console.warn('[Input Dispatch] Invalid input packet', err);
       }
     } else if (label === 'control') {
+      // Binary frames are file chunks; the channel is ordered + reliable, so arrival order is file order
+      if (typeof data !== 'string') {
+        const file = this.incomingFile;
+        if (!file) return;
+        file.parts.push(data);
+        file.receivedBytes += data.byteLength;
+        if (file.receivedBytes > file.fileSize) {
+          console.warn('[File Transfer] Peer sent more bytes than announced; dropping transfer');
+          this.incomingFile = null;
+          return;
+        }
+        this.events.onFileTransferProgress?.(file.fileName, Math.round((file.receivedBytes / file.fileSize) * 100));
+        if (file.receivedBytes === file.fileSize) {
+          this.incomingFile = null;
+          this.events.onFileTransferComplete?.(file.fileName, new Blob(file.parts));
+        }
+        return;
+      }
       try {
         const msg = JSON.parse(data);
-        if (msg.type === 'clipboard_sync' && this.permissions.clipboard) {
+        if (msg.type === 'quality_preset' && this.role === 'host' && ['speed', 'balanced', 'quality'].includes(msg.preset)) {
+          this.applyQualityPreset(msg.preset);
+        } else if (msg.type === 'clipboard_sync' && this.permissions.clipboard) {
           if (window.aeroDeskApi) {
             window.aeroDeskApi.writeClipboard(msg.text);
           }
           this.events.onClipboardReceived?.(msg.text);
         } else if (msg.type === 'file_meta' && this.permissions.fileTransfer) {
-          this.incomingFile = {
-            fileName: msg.fileName,
-            fileSize: msg.fileSize,
-            totalChunks: msg.totalChunks,
-            receivedChunks: new Map()
-          };
-          this.events.onFileTransferProgress?.(msg.fileName, 0);
-        } else if (msg.type === 'file_chunk' && this.incomingFile) {
-          const rawBytes = Uint8Array.from(atob(msg.dataBase64), c => c.charCodeAt(0));
-          this.incomingFile.receivedChunks.set(msg.chunkIndex, rawBytes);
-
-          const percent = Math.round((this.incomingFile.receivedChunks.size / this.incomingFile.totalChunks) * 100);
-          this.events.onFileTransferProgress?.(this.incomingFile.fileName, percent);
-
-          if (this.incomingFile.receivedChunks.size === this.incomingFile.totalChunks) {
-            // Reassemble
-            const parts: Uint8Array[] = [];
-            for (let i = 0; i < this.incomingFile.totalChunks; i++) {
-              parts.push(this.incomingFile.receivedChunks.get(i)!);
-            }
-            const blob = new Blob(parts);
-            this.events.onFileTransferComplete?.(this.incomingFile.fileName, blob);
-            this.incomingFile = null;
+          // Peer-supplied size: reject anything invalid or over the 100 MB cap
+          if (!Number.isInteger(msg.fileSize) || msg.fileSize < 0 || msg.fileSize > MAX_FILE_BYTES) {
+            console.warn('[File Transfer] Rejected invalid file metadata');
+            return;
           }
+          if (msg.fileSize === 0) {
+            this.events.onFileTransferComplete?.(String(msg.fileName), new Blob([]));
+            return;
+          }
+          this.incomingFile = {
+            fileName: String(msg.fileName),
+            fileSize: msg.fileSize,
+            receivedBytes: 0,
+            parts: []
+          };
+          this.events.onFileTransferProgress?.(this.incomingFile.fileName, 0);
         }
       } catch (err) {
         console.warn('[Control Message Error]', err);
@@ -295,55 +326,51 @@ export class WebRTCManager {
     }
   }
 
-  public sendClipboardText(text: string) {
+  public sendClipboardText(text: string): boolean {
     if (this.permissions.clipboard && this.controlChannel && this.controlChannel.readyState === 'open') {
       this.controlChannel.send(JSON.stringify({
         type: 'clipboard_sync',
         text
       }));
+      return true;
     }
+    return false;
   }
 
   public async sendFile(file: File) {
-    if (!this.permissions.fileTransfer || !this.controlChannel || this.controlChannel.readyState !== 'open') {
+    const channel = this.controlChannel;
+    if (!this.permissions.fileTransfer || !channel || channel.readyState !== 'open') {
       throw new Error('File transfer is not permitted or control channel is closed');
     }
 
-    const CHUNK_SIZE = 16384; // 16 KB chunks
-    const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
+    // Wait until the outgoing buffer drops to `threshold`; event-driven since timers get throttled in background windows
+    const drain = (threshold: number) => new Promise<void>((resolve) => {
+      if (channel.bufferedAmount <= threshold) return resolve();
+      channel.bufferedAmountLowThreshold = threshold;
+      channel.addEventListener('bufferedamountlow', () => resolve(), { once: true });
+      channel.addEventListener('close', () => resolve(), { once: true }); // send() then throws instead of hanging
+    });
 
-    // Send meta
-    this.controlChannel.send(JSON.stringify({
+    channel.send(JSON.stringify({
       type: 'file_meta',
       fileName: file.name,
-      fileSize: file.size,
-      totalChunks
+      fileSize: file.size
     }));
 
     const buffer = await file.arrayBuffer();
-    const uint8 = new Uint8Array(buffer);
-
-    for (let i = 0; i < totalChunks; i++) {
-      const start = i * CHUNK_SIZE;
-      const end = Math.min(start + CHUNK_SIZE, file.size);
-      const chunkBytes = uint8.slice(start, end);
-
-      // Convert chunk to base64
-      let binary = '';
-      for (let j = 0; j < chunkBytes.length; j++) {
-        binary += String.fromCharCode(chunkBytes[j]);
-      }
-      const dataBase64 = btoa(binary);
-
-      this.controlChannel.send(JSON.stringify({
-        type: 'file_chunk',
-        chunkIndex: i,
-        dataBase64
-      }));
-
-      const percent = Math.round(((i + 1) / totalChunks) * 100);
-      this.events.onFileTransferProgress?.(file.name, percent);
+    for (let offset = 0; offset < file.size; offset += CHUNK_SIZE) {
+      // Backpressure: send() throws once the outgoing buffer overflows on large files
+      await drain(BUFFER_HIGH_WATER);
+      channel.send(buffer.slice(offset, offset + CHUNK_SIZE));
+      // Progress counts bytes that actually left this machine, not bytes queued
+      const delivered = Math.min(file.size, offset + CHUNK_SIZE) - channel.bufferedAmount;
+      this.events.onFileTransferProgress?.(file.name, Math.max(0, Math.min(99, Math.floor((delivered / file.size) * 100))));
     }
+    await drain(0);
+    if (channel.readyState !== 'open') {
+      throw new Error('Connection closed before the file was fully sent');
+    }
+    this.events.onFileTransferProgress?.(file.name, 100);
   }
 
   private async acquireScreenStream(preferredSourceId?: string): Promise<MediaStream> {
@@ -400,6 +427,9 @@ export class WebRTCManager {
     const videoSender = senders.find(s => s.track && s.track.kind === 'video');
     if (!videoSender) return;
 
+    // Screen content: 'detail' keeps text crisp, 'motion' favors smooth frame rate
+    videoSender.track!.contentHint = preset === 'speed' ? 'motion' : 'detail';
+
     const params = videoSender.getParameters();
     if (!params.encodings || params.encodings.length === 0) {
       params.encodings = [{}];
@@ -416,6 +446,9 @@ export class WebRTCManager {
       params.encodings[0].maxFramerate = 45;
     }
 
+    // Under CPU/bandwidth pressure, only "quality" may drop frames; frame drops make the cursor stutter
+    (params as any).degradationPreference = preset === 'quality' ? 'maintain-resolution' : 'maintain-framerate';
+
     videoSender.setParameters(params).catch(err => {
       console.warn('[WebRTC Quality] Failed to adjust sender bitrate:', err);
     });
@@ -427,24 +460,22 @@ export class WebRTCManager {
       if (!this.pc) return;
       try {
         const stats = await this.pc.getStats();
-        let rtt = 15;
-        let fps = 60;
+        let rtt = 0;
+        let fps = 0;
         let bitrate = 0;
 
         stats.forEach((report) => {
           if (report.type === 'candidate-pair' && report.currentRoundTripTime) {
             rtt = Math.round(report.currentRoundTripTime * 1000);
           }
-          if (report.type === 'inbound-rtp' && report.kind === 'video') {
+          if (report.type === (this.role === 'host' ? 'outbound-rtp' : 'inbound-rtp') && report.kind === 'video') {
+            const bytes = this.role === 'host' ? report.bytesSent : report.bytesReceived;
             if (report.framesPerSecond) fps = Math.round(report.framesPerSecond);
-            if (report.bytesReceived && this.lastStatsTimestamp) {
-              const deltaBytes = report.bytesReceived - this.lastBytes;
+            if (bytes && this.lastStatsTimestamp) {
               const deltaTime = (report.timestamp - this.lastStatsTimestamp) / 1000;
-              bitrate = Math.round((deltaBytes * 8) / (deltaTime * 1000)); // kbps
-              this.lastBytes = report.bytesReceived;
-            } else {
-              this.lastBytes = report.bytesReceived;
+              bitrate = Math.round(((bytes - this.lastBytes) * 8) / (deltaTime * 1000)); // kbps
             }
+            this.lastBytes = bytes || 0;
             this.lastStatsTimestamp = report.timestamp;
           }
         });
@@ -481,5 +512,6 @@ export class WebRTCManager {
     }
     this.remoteStream = null;
     this.pendingCandidates = [];
+    this.hostReady = null;
   }
 }

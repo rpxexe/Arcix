@@ -1,5 +1,5 @@
 // src/components/Dashboard.tsx
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   Copy,
   Check,
@@ -23,7 +23,8 @@ interface DashboardProps {
   connectionState: ConnectionState;
   recentSessions: RecentSession[];
   savedDevices: SavedDevice[];
-  onConnect: (targetId: string, perms: SessionPermissions, quality: QualityPreset) => void;
+  onConnect: (targetId: string, perms: SessionPermissions, quality: QualityPreset, password?: string) => void;
+  onCancelCall: () => void;
   onOpenSettings: () => void;
 }
 
@@ -33,9 +34,20 @@ export const Dashboard: React.FC<DashboardProps> = ({
   recentSessions,
   savedDevices,
   onConnect,
+  onCancelCall,
   onOpenSettings
 }) => {
   const [remoteId, setRemoteId] = useState('');
+  const [password, setPassword] = useState('');
+  const [osLabel, setOsLabel] = useState('…');
+
+  useEffect(() => {
+    window.aeroDeskApi?.getSystemInfo().then(({ platform, release, arch }) => {
+      // Windows 11 still reports kernel 10.0; build 22000+ is 11
+      const build = Number(release.split('.')[2] || 0);
+      setOsLabel(platform === 'win32' ? `Windows ${build >= 22000 ? 11 : 10} (${arch})` : `${platform} ${release} (${arch})`);
+    });
+  }, []);
   const [copied, setCopied] = useState(false);
   const [activeTab, setActiveTab] = useState<'recent' | 'saved'>('recent');
 
@@ -71,7 +83,8 @@ export const Dashboard: React.FC<DashboardProps> = ({
     e.preventDefault();
     const cleanId = remoteId.replace(/\s+/g, '');
     if (cleanId.length === 9) {
-      onConnect(cleanId, permissions, quality);
+      onConnect(cleanId, permissions, quality, password);
+      setPassword('');
     }
   };
 
@@ -205,7 +218,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
             fontSize: 12,
             color: 'var(--text-dim)'
           }}>
-            <span>Operating System: Windows 11 (x64)</span>
+            <span>Operating System: {osLabel}</span>
             <span>Security: DTLS-SRTP End-to-End</span>
           </div>
         </div>
@@ -272,26 +285,58 @@ export const Dashboard: React.FC<DashboardProps> = ({
                   onBlur={(e) => e.target.style.borderColor = 'var(--border-subtle)'}
                 />
 
-                <button
-                  type="submit"
-                  id="connect-remote-btn"
-                  className="btn-primary"
-                  disabled={remoteId.replace(/\s+/g, '').length !== 9 || connectionState === 'calling' || connectionState === 'connecting'}
-                  style={{ minWidth: 120 }}
-                >
-                  {connectionState === 'calling' || connectionState === 'connecting' ? (
-                    <>
-                      <RefreshCw size={16} className="animate-spin" />
-                      Calling...
-                    </>
-                  ) : (
-                    <>
-                      Connect
-                      <ArrowRight size={16} />
-                    </>
-                  )}
-                </button>
+                {connectionState === 'calling' ? (
+                  <button
+                    type="button"
+                    id="cancel-call-btn"
+                    className="btn-secondary"
+                    onClick={onCancelCall}
+                    style={{ minWidth: 120 }}
+                  >
+                    <RefreshCw size={16} className="animate-spin" />
+                    Cancel
+                  </button>
+                ) : (
+                  <button
+                    type="submit"
+                    id="connect-remote-btn"
+                    className="btn-primary"
+                    disabled={remoteId.replace(/\s+/g, '').length !== 9 || connectionState === 'connecting'}
+                    style={{ minWidth: 120 }}
+                  >
+                    {connectionState === 'connecting' ? (
+                      <>
+                        <RefreshCw size={16} className="animate-spin" />
+                        Connecting...
+                      </>
+                    ) : (
+                      <>
+                        Connect
+                        <ArrowRight size={16} />
+                      </>
+                    )}
+                  </button>
+                )}
               </div>
+              <input
+                type="password"
+                id="remote-password-input"
+                aria-label="Unattended access password (optional)"
+                placeholder="Unattended password (optional)"
+                autoComplete="off"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                style={{
+                  width: '100%',
+                  marginTop: 10,
+                  background: 'rgba(7, 9, 14, 0.85)',
+                  border: '1px solid var(--border-subtle)',
+                  borderRadius: 8,
+                  padding: '10px 14px',
+                  color: '#fff',
+                  fontSize: 13
+                }}
+              />
             </div>
 
             {/* Granular Permission Presets */}

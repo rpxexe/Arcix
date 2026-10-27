@@ -61,6 +61,11 @@ const aeroDeskApi = {
     return ipcRenderer.invoke('host-overlay:hide');
   },
 
+  // Host overlay banner buttons (revoke / disconnect / collapse / expand)
+  hostOverlayAction: (action: 'revoke' | 'disconnect' | 'collapse' | 'expand') => {
+    ipcRenderer.send('host-overlay:action', action);
+  },
+
   // Clipboard
   readClipboard: (): Promise<string> => {
     return ipcRenderer.invoke('clipboard:read-text');
@@ -68,6 +73,11 @@ const aeroDeskApi = {
 
   writeClipboard: (text: string): Promise<boolean> => {
     return ipcRenderer.invoke('clipboard:write-text', text);
+  },
+
+  // Received files are saved to the user's Downloads folder; resolves to the saved path
+  saveReceivedFile: (fileName: string, data: Uint8Array): Promise<string> => {
+    return ipcRenderer.invoke('file:save-received', fileName, data);
   },
 
   // Audit Logs
@@ -80,7 +90,7 @@ const aeroDeskApi = {
   },
 
   // System Details
-  getSystemInfo: (): Promise<{ platform: string; hostname: string; arch: string }> => {
+  getSystemInfo: (): Promise<{ platform: string; release: string; hostname: string; arch: string }> => {
     return ipcRenderer.invoke('system:get-info');
   },
 
@@ -102,23 +112,13 @@ const aeroDeskApi = {
     return () => ipcRenderer.removeListener('session:host-disconnect', listener);
   },
 
-  // Incoming Call Popover & Notifications
+  // Incoming call: raise the main window (in-app prompt) / release it once answered
   notifyIncomingCall: (callData: any): Promise<boolean> => {
     return ipcRenderer.invoke('incoming-call:notify', callData);
   },
 
-  closeIncomingCallPopover: (): Promise<boolean> => {
-    return ipcRenderer.invoke('incoming-call:close-popover');
-  },
-
-  respondFromPopover: (accepted: boolean, permissions?: any): Promise<boolean> => {
-    return ipcRenderer.invoke('incoming-call:popover-response', accepted, permissions);
-  },
-
-  onPopoverDecision: (callback: (data: { accepted: boolean; permissions?: any }) => void) => {
-    const listener = (_: any, data: any) => callback(data);
-    ipcRenderer.on('session:popover-decision', listener);
-    return () => ipcRenderer.removeListener('session:popover-decision', listener);
+  clearIncomingCallAlert: (): Promise<boolean> => {
+    return ipcRenderer.invoke('incoming-call:clear-alert');
   }
 };
 

@@ -16,11 +16,11 @@ import {
   Minimize2,
   Maximize2
 } from 'lucide-react';
-import { ActiveSessionState } from '../types';
+import { ActiveSessionData } from '../types';
 import { WebRTCManager } from '../services/webrtc-manager';
 
 interface HostSessionViewProps {
-  session: ActiveSessionState;
+  session: ActiveSessionData;
   webrtc: WebRTCManager;
   onDisconnect: () => void;
   onOpenFileTransfer?: () => void;

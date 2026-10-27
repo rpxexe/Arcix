@@ -10,6 +10,7 @@ import { FileTransferModal } from './components/FileTransferModal';
 import { SignalingClient } from './services/signaling-client';
 import { WebRTCManager } from './services/webrtc-manager';
 import { getSignalingUrl } from './services/config';
+import { verifyUnattendedPassword } from './services/unattended';
 import {
   ActiveSessionData,
   ConnectionState,
@@ -37,6 +38,12 @@ export const App: React.FC = () => {
   const webrtcRef = useRef<WebRTCManager | null>(null);
   const incomingCallRef = useRef<IncomingCallData | null>(null);
   incomingCallRef.current = incomingCall;
+  // Callbacks registered once at mount (overlay, shortcut, signaling) need the live session, not the first render's
+  const activeSessionRef = useRef<ActiveSessionData | null>(null);
+  const requestedQualityRef = useRef<QualityPreset>('balanced');
+  // Outgoing call still ringing; cleared on answer, failure or cancel
+  const pendingCallRef = useRef<string | null>(null);
+  activeSessionRef.current = activeSession;
 
   // Initialize Services
   useEffect(() => {
@@ -66,14 +73,26 @@ export const App: React.FC = () => {
         setConnectionState('idle');
       },
 
-      onIncomingCall: (call) => {
+      onIncomingCall: async ({ password, ...call }) => {
+        // Unattended access: correct password skips the prompt; wrong one falls back to manual approval
+        if (await verifyUnattendedPassword(password || '')) {
+          incomingCallRef.current = call;
+          handleAcceptIncomingCall(call.requestedPermissions);
+          return;
+        }
         setIncomingCall(call);
         setConnectionState('ringing');
-        // Trigger always-on-top popover and unminimize window if minimized
+        // Raise the window so the approval prompt is seen even if minimized
         window.aeroDeskApi?.notifyIncomingCall(call);
       },
 
       onCallAccepted: async (hostId, hostName, grantedPermissions) => {
+        if (!pendingCallRef.current) {
+          // Host accepted just as we cancelled: end it on their side too
+          signaling.endSession(hostId, 'Caller cancelled the request');
+          return;
+        }
+        pendingCallRef.current = null;
         console.log(`[App] Call accepted by ${hostId}`);
         setConnectionState('connected');
 
@@ -84,7 +103,7 @@ export const App: React.FC = () => {
           permissions: grantedPermissions,
           startTime: Date.now(),
           durationSeconds: 0,
-          quality: 'balanced',
+          quality: requestedQualityRef.current,
           rttMs: 15,
           fps: 60,
           bitrateKbps: 0,
@@ -106,15 +125,17 @@ export const App: React.FC = () => {
         });
 
         // Initialize WebRTC as viewer
-        await webrtc.startAsViewer(hostId, grantedPermissions);
+        await webrtc.startAsViewer(hostId, grantedPermissions, requestedQualityRef.current);
       },
 
       onCallRejected: (hostId, reason) => {
+        pendingCallRef.current = null;
         alert(`Connection to ${hostId} was rejected: ${reason}`);
         setConnectionState('idle');
       },
 
       onCallFailed: (targetId, reason) => {
+        pendingCallRef.current = null;
         alert(`Connection to ${targetId} failed: ${reason}`);
         setConnectionState('idle');
       },
@@ -132,6 +153,14 @@ export const App: React.FC = () => {
       },
 
       onSessionEnd: (peerId, reason) => {
+        // Caller cancelled while we were still being asked: dismiss the prompt
+        const ringing = incomingCallRef.current;
+        if (ringing && ringing.callerId.replace(/\s+/g, '') === peerId.replace(/\s+/g, '')) {
+          window.aeroDeskApi?.clearIncomingCallAlert();
+          setIncomingCall(null);
+          setConnectionState('idle');
+          return;
+        }
         console.log(`[App] Session ended by ${peerId}: ${reason}`);
         handleDisconnect(false);
       },
@@ -143,6 +172,14 @@ export const App: React.FC = () => {
 
     // Attach webrtc telemetry events
     webrtc.setEvents({
+      onFileTransferComplete: async (fileName, blob) => {
+        try {
+          const savedPath = await window.aeroDeskApi?.saveReceivedFile(fileName, new Uint8Array(await blob.arrayBuffer()));
+          if (savedPath) new Notification('File received', { body: savedPath });
+        } catch (err) {
+          console.error('[App] Failed to save received file:', err);
+        }
+      },
       onStatsUpdate: (stats) => {
         setActiveSession((prev) => {
           if (!prev) return null;
@@ -173,22 +210,11 @@ export const App: React.FC = () => {
       handleDisconnect(true);
     });
 
-    // Listen for Popover Decisions (from always-on-top approval popover window)
-    const cleanupPopover = window.aeroDeskApi?.onPopoverDecision(({ accepted, permissions }) => {
-      console.log('[App] Received approval decision from popover:', accepted);
-      if (accepted) {
-        handleAcceptIncomingCall(permissions);
-      } else {
-        handleRejectIncomingCall('Connection declined by host user');
-      }
-    });
-
     signaling.connect();
 
     return () => {
       cleanupRevoke?.();
       cleanupDisconnect?.();
-      cleanupPopover?.();
       signaling.disconnect();
       webrtc.close();
     };
@@ -229,10 +255,20 @@ export const App: React.FC = () => {
     localStorage.setItem('aerodesk_recent_sessions', JSON.stringify(updated));
   };
 
-  const handleConnect = (targetId: string, perms: SessionPermissions, quality: QualityPreset) => {
+  const handleConnect = (targetId: string, perms: SessionPermissions, quality: QualityPreset, password?: string) => {
     if (!signalingRef.current) return;
+    requestedQualityRef.current = quality;
+    pendingCallRef.current = targetId;
     setConnectionState('calling');
-    signalingRef.current.callRemoteDevice(targetId, perms);
+    signalingRef.current.callRemoteDevice(targetId, perms, password);
+  };
+
+  const handleCancelCall = () => {
+    if (pendingCallRef.current) {
+      signalingRef.current?.endSession(pendingCallRef.current, 'Caller cancelled the request');
+    }
+    pendingCallRef.current = null;
+    setConnectionState('idle');
   };
 
   const handleAcceptIncomingCall = async (grantedPermissions?: SessionPermissions) => {
@@ -242,11 +278,9 @@ export const App: React.FC = () => {
     const callerName = call.callerName;
     const permissions = grantedPermissions || call.requestedPermissions;
 
-    // Close any active approval popover window
-    window.aeroDeskApi?.closeIncomingCallPopover();
+    window.aeroDeskApi?.clearIncomingCallAlert();
 
     setIncomingCall(null);
-    setConnectionState('connected');
 
     setActiveSession({
       peerId: callerId,
@@ -265,6 +299,7 @@ export const App: React.FC = () => {
 
     // Accept via signaling
     signalingRef.current.respondToIncomingCall(callerId, true, permissions);
+    setConnectionState('connected'); // after respond(), which reports 'connecting'
 
     // Show host indicator floating overlay window
     window.aeroDeskApi?.showHostOverlay({
@@ -291,8 +326,7 @@ export const App: React.FC = () => {
     const call = incomingCallRef.current || incomingCall;
     if (!call || !signalingRef.current) return;
 
-    // Close any active approval popover window
-    window.aeroDeskApi?.closeIncomingCallPopover();
+    window.aeroDeskApi?.clearIncomingCallAlert();
 
     signalingRef.current.respondToIncomingCall(call.callerId, false, {
       view: false,
@@ -314,6 +348,7 @@ export const App: React.FC = () => {
   };
 
   const handleDisconnect = (notifyPeer: boolean = true) => {
+    const activeSession = activeSessionRef.current;
     if (activeSession && notifyPeer && signalingRef.current) {
       signalingRef.current.endSession(activeSession.peerId, 'Session ended by user');
     }
@@ -377,6 +412,7 @@ export const App: React.FC = () => {
             recentSessions={recentSessions}
             savedDevices={savedDevices}
             onConnect={handleConnect}
+            onCancelCall={handleCancelCall}
             onOpenSettings={() => setSettingsOpen(true)}
           />
         )}

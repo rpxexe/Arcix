@@ -174,13 +174,15 @@ async function runTestSuite() {
         type: 'call_request',
         fromId: viewerId,
         targetId: hostId,
-        requestedPermissions: { view: true, input: true, clipboard: true, fileTransfer: true }
+        requestedPermissions: { view: true, input: true, clipboard: true, fileTransfer: true },
+        password: 'unattended-secret'
       }));
 
       const hostHandler = (raw) => {
         const msg = JSON.parse(raw.toString());
         if (msg.type === 'incoming_call') {
           assert(msg.callerId === viewerId, 'Host received incoming call from viewer');
+          assert(msg.password === 'unattended-secret', 'Host received unattended access password');
           assert(msg.requestedPermissions.input === true, 'Host observed requested input permission');
           hostWs.off('message', hostHandler);
 

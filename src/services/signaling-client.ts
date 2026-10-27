@@ -107,7 +107,8 @@ export class SignalingClient {
         this.handlers.onIncomingCall?.({
           callerId: msg.callerId,
           callerName: msg.callerName,
-          requestedPermissions: msg.requestedPermissions
+          requestedPermissions: msg.requestedPermissions,
+          password: msg.password
         });
         break;
 
@@ -158,12 +159,13 @@ export class SignalingClient {
     }
   }
 
-  public callRemoteDevice(targetId: string, requestedPermissions: SessionPermissions) {
+  public callRemoteDevice(targetId: string, requestedPermissions: SessionPermissions, password?: string) {
     this.send({
       type: 'call_request',
       fromId: this.myDeviceId,
       targetId: targetId.replace(/\s+/g, ''),
-      requestedPermissions
+      requestedPermissions,
+      password: password || undefined
     });
   }
 
