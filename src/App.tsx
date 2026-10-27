@@ -4,10 +4,12 @@ import { Titlebar } from './components/Titlebar';
 import { Dashboard } from './components/Dashboard';
 import { IncomingCallModal } from './components/IncomingCallModal';
 import { RemoteSessionViewport } from './components/RemoteSessionViewport';
+import { HostSessionView } from './components/HostSessionView';
 import { SettingsModal } from './components/SettingsModal';
 import { FileTransferModal } from './components/FileTransferModal';
 import { SignalingClient } from './services/signaling-client';
 import { WebRTCManager } from './services/webrtc-manager';
+import { getSignalingUrl } from './services/config';
 import {
   ActiveSessionData,
   ConnectionState,
@@ -47,7 +49,8 @@ export const App: React.FC = () => {
       try { setSavedDevices(JSON.parse(savedDevs)); } catch (_) {}
     }
 
-    const signalingUrl = localStorage.getItem('aerodesk_signaling_url') || 'ws://localhost:7070';
+    const signalingUrl = getSignalingUrl();
+    console.log('[App] Connecting to signaling gateway:', signalingUrl);
     const signaling = new SignalingClient(signalingUrl);
     signalingRef.current = signaling;
 
@@ -193,7 +196,7 @@ export const App: React.FC = () => {
     return () => {
       if (timer) clearInterval(timer);
     };
-  }, [activeSession]);
+  }, [!!activeSession]);
 
   const addRecentSession = (deviceId: string, deviceName: string) => {
     const updated = [
@@ -321,12 +324,27 @@ export const App: React.FC = () => {
 
       <main style={{ flex: 1, position: 'relative', overflow: 'hidden' }}>
         {activeSession ? (
-          <RemoteSessionViewport
-            session={activeSession}
-            webrtc={webrtcRef.current!}
-            onDisconnect={() => handleDisconnect(true)}
-            onOpenFileTransfer={() => setFileTransferOpen(true)}
-          />
+          activeSession.role === 'host' ? (
+            <HostSessionView
+              session={activeSession}
+              webrtc={webrtcRef.current!}
+              onDisconnect={() => handleDisconnect(true)}
+              onOpenFileTransfer={() => setFileTransferOpen(true)}
+              onToggleInputPermission={(allowed) => {
+                setActiveSession((prev) => prev ? {
+                  ...prev,
+                  permissions: { ...prev.permissions, input: allowed }
+                } : null);
+              }}
+            />
+          ) : (
+            <RemoteSessionViewport
+              session={activeSession}
+              webrtc={webrtcRef.current!}
+              onDisconnect={() => handleDisconnect(true)}
+              onOpenFileTransfer={() => setFileTransferOpen(true)}
+            />
+          )
         ) : (
           <Dashboard
             myDeviceId={myDeviceId}

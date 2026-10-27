@@ -15,6 +15,7 @@ import {
   HardDrive
 } from 'lucide-react';
 import { AuditLogEntry } from '../../electron/preload';
+import { getSignalingUrl, getDefaultSignalingUrl, saveSignalingUrl } from '../services/config';
 
 interface SettingsModalProps {
   onClose: () => void;
@@ -29,7 +30,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ onClose }) => {
 
   const [requireConsent, setRequireConsent] = useState(true);
   const [auditLogs, setAuditLogs] = useState<AuditLogEntry[]>([]);
-  const [serverUrl, setServerUrl] = useState('ws://localhost:7070');
+  const [serverUrl, setServerUrl] = useState(() => getSignalingUrl());
 
   useEffect(() => {
     // Load stored settings
@@ -39,8 +40,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ onClose }) => {
     const savedUnattended = localStorage.getItem('aerodesk_unattended_enabled');
     if (savedUnattended === 'true') setUnattendedEnabled(true);
 
-    const savedUrl = localStorage.getItem('aerodesk_signaling_url');
-    if (savedUrl) setServerUrl(savedUrl);
+    setServerUrl(getSignalingUrl());
 
     // Fetch audit logs
     if (window.aeroDeskApi) {
@@ -53,7 +53,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ onClose }) => {
   const handleSaveSecurity = () => {
     localStorage.setItem('aerodesk_require_consent', requireConsent.toString());
     localStorage.setItem('aerodesk_unattended_enabled', unattendedEnabled.toString());
-    localStorage.setItem('aerodesk_signaling_url', serverUrl);
+    saveSignalingUrl(serverUrl);
 
     if (unattendedPassword) {
       // In a real app we salt and hash before storing
@@ -245,25 +245,54 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ onClose }) => {
                 </div>
 
                 <div style={{ borderTop: '1px solid var(--border-subtle)', paddingTop: 16 }}>
-                  <h3 style={{ fontSize: 15, fontWeight: 600, color: '#fff', marginBottom: 6 }}>
-                    Signaling Gateway Server
-                  </h3>
-                  <input
-                    type="text"
-                    value={serverUrl}
-                    onChange={(e) => setServerUrl(e.target.value)}
-                    style={{
-                      width: '100%',
-                      maxWidth: 360,
-                      background: 'rgba(7, 9, 14, 0.85)',
-                      border: '1px solid var(--border-subtle)',
-                      borderRadius: 8,
-                      padding: '10px 14px',
-                      color: '#fff',
-                      fontSize: 13,
-                      fontFamily: 'var(--font-mono)'
-                    }}
-                  />
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
+                    <h3 style={{ fontSize: 15, fontWeight: 600, color: '#fff', margin: 0 }}>
+                      Signaling Gateway Server
+                    </h3>
+                    <span style={{
+                      fontSize: 11,
+                      padding: '2px 8px',
+                      borderRadius: 4,
+                      background: serverUrl === getDefaultSignalingUrl() ? 'rgba(16, 185, 129, 0.15)' : 'rgba(245, 158, 11, 0.15)',
+                      color: serverUrl === getDefaultSignalingUrl() ? '#10b981' : '#f59e0b',
+                      border: `1px solid ${serverUrl === getDefaultSignalingUrl() ? 'rgba(16, 185, 129, 0.3)' : 'rgba(245, 158, 11, 0.3)'}`
+                    }}>
+                      {serverUrl === getDefaultSignalingUrl() ? 'Using .env Default' : 'Custom Override'}
+                    </span>
+                  </div>
+                  <p style={{ fontSize: 12, color: 'var(--text-dim)', marginBottom: 8 }}>
+                    WebSocket server used for peer discovery, DTLS-SRTP negotiation, and NAT traversal.
+                  </p>
+                  <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                    <input
+                      type="text"
+                      value={serverUrl}
+                      onChange={(e) => setServerUrl(e.target.value)}
+                      placeholder={getDefaultSignalingUrl()}
+                      style={{
+                        flex: 1,
+                        maxWidth: 380,
+                        background: 'rgba(7, 9, 14, 0.85)',
+                        border: '1px solid var(--border-subtle)',
+                        borderRadius: 8,
+                        padding: '10px 14px',
+                        color: '#fff',
+                        fontSize: 13,
+                        fontFamily: 'var(--font-mono)'
+                      }}
+                    />
+                    {serverUrl !== getDefaultSignalingUrl() && (
+                      <button
+                        type="button"
+                        onClick={() => setServerUrl(getDefaultSignalingUrl())}
+                        className="btn-secondary"
+                        style={{ padding: '8px 12px', fontSize: 12 }}
+                        title="Revert to default specified in .env"
+                      >
+                        Reset to .env
+                      </button>
+                    )}
+                  </div>
                 </div>
 
                 <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 10 }}>

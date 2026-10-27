@@ -226,17 +226,19 @@ export const RemoteSessionViewport: React.FC<RemoteSessionViewportProps> = ({
           gap: 16,
           boxShadow: '0 8px 30px rgba(0, 0, 0, 0.5)',
           userSelect: 'none',
-          transition: 'all 0.2s ease'
+          transition: 'all 0.2s ease',
+          whiteSpace: 'nowrap',
+          flexWrap: 'nowrap'
         }}
       >
         {/* Remote Partner Info & Timer */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-          <div className="online-pulse" style={{ background: '#10b981' }} />
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0, whiteSpace: 'nowrap' }}>
+          <div className="online-pulse" style={{ background: '#10b981', flexShrink: 0 }} />
           <div>
-            <div style={{ fontSize: 12, fontWeight: 700, color: '#fff', fontFamily: 'var(--font-mono)' }}>
+            <div style={{ fontSize: 12, fontWeight: 700, color: '#fff', fontFamily: 'var(--font-mono)', whiteSpace: 'nowrap' }}>
               {session.peerId}
             </div>
-            <div style={{ fontSize: 10, color: 'var(--text-dim)' }}>
+            <div style={{ fontSize: 10, color: 'var(--text-dim)', whiteSpace: 'nowrap' }}>
               {formatDuration(session.durationSeconds)}
             </div>
           </div>
@@ -400,7 +402,7 @@ export const RemoteSessionViewport: React.FC<RemoteSessionViewportProps> = ({
           width: fitToWindow ? '100%' : 'auto',
           height: fitToWindow ? '100%' : 'auto',
           objectFit: fitToWindow ? 'contain' : 'none',
-          cursor: isInputEnabled && session.role === 'viewer' ? 'crosshair' : 'default',
+          cursor: 'default',
           backgroundColor: '#05070a'
         }}
       />

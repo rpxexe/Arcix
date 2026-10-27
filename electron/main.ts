@@ -1,5 +1,5 @@
 // electron/main.ts
-import { app, BrowserWindow, ipcMain, desktopCapturer, globalShortcut, clipboard } from 'electron';
+import { app, BrowserWindow, ipcMain, desktopCapturer, globalShortcut, clipboard, screen } from 'electron';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
@@ -125,12 +125,19 @@ function createHostOverlayWindow(info: { peerId: string; peerName: string; permi
     overlayWindow.close();
   }
 
-  // Floating top banner on host screen
+  const primaryDisplay = screen.getPrimaryDisplay();
+  const { width, height } = primaryDisplay.workAreaSize;
+  const overlayWidth = 480;
+  const overlayHeight = 64;
+  const x = Math.max(0, width - overlayWidth - 24);
+  const y = Math.max(0, height - overlayHeight - 24);
+
+  // Floating banner on bottom-right of host screen above taskbar
   overlayWindow = new BrowserWindow({
-    width: 480,
-    height: 64,
-    x: 40,
-    y: 20,
+    width: overlayWidth,
+    height: overlayHeight,
+    x,
+    y,
     frame: false,
     transparent: true,
     alwaysOnTop: true,
