@@ -33,7 +33,7 @@ module.exports = (req, res) => {
     type: 'registered',
     deviceId: formatId(deviceId),
     token: token || crypto.randomBytes(16).toString('hex'),
-    gateway: 'AeroDesk Vercel Edge',
+    gateway: 'Arcix Vercel Edge',
     iceServers: [
       { urls: 'stun:stun.l.google.com:19302' },
       { urls: 'stun:stun1.l.google.com:19302' }

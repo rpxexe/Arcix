@@ -8,7 +8,7 @@ const fs = require('fs');
 
 async function runTestSuite() {
   console.log('========================================================');
-  console.log('       AERODESK AUTOMATED VERIFICATION TEST SUITE       ');
+  console.log('         ARCIX AUTOMATED VERIFICATION TEST SUITE         ');
   console.log('========================================================\n');
 
   let passedTests = 0;

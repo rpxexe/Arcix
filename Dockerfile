@@ -1,4 +1,4 @@
-# Dockerfile for AeroDesk Persistent WebSocket Signaling Server
+# Dockerfile for Arcix Persistent WebSocket Signaling Server
 FROM node:22-alpine
 
 WORKDIR /app

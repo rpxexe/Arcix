@@ -7,6 +7,7 @@ import { RemoteSessionViewport } from './components/RemoteSessionViewport';
 import { HostSessionView } from './components/HostSessionView';
 import { SettingsModal } from './components/SettingsModal';
 import { FileTransferModal } from './components/FileTransferModal';
+import { summarizeTransfer, TransferSummary } from './components/TransferList';
 import { SignalingClient } from './services/signaling-client';
 import { WebRTCManager } from './services/webrtc-manager';
 import { getSignalingUrl } from './services/config';
@@ -14,6 +15,7 @@ import { verifyUnattendedPassword } from './services/unattended';
 import {
   ActiveSessionData,
   ConnectionState,
+  FileTransferItem,
   IncomingCallData,
   QualityPreset,
   RecentSession,
@@ -32,6 +34,7 @@ export const App: React.FC = () => {
 
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [fileTransferOpen, setFileTransferOpen] = useState(false);
+  const [transfers, setTransfers] = useState<FileTransferItem[]>([]);
 
   // Core Service Instances
   const signalingRef = useRef<SignalingClient | null>(null);
@@ -172,12 +175,12 @@ export const App: React.FC = () => {
 
     // Attach webrtc telemetry events
     webrtc.setEvents({
-      onFileTransferComplete: async (fileName, blob) => {
-        try {
-          const savedPath = await window.aeroDeskApi?.saveReceivedFile(fileName, new Uint8Array(await blob.arrayBuffer()));
-          if (savedPath) new Notification('File received', { body: savedPath });
-        } catch (err) {
-          console.error('[App] Failed to save received file:', err);
+      onTransferUpdate: (transfer) => {
+        setTransfers((prev) => prev.some((t) => t.id === transfer.id)
+          ? prev.map((t) => (t.id === transfer.id ? transfer : t))
+          : [...prev, transfer]);
+        if (transfer.direction === 'receive' && transfer.status === 'done' && transfer.savedPath) {
+          new Notification('File received', { body: transfer.savedPath });
         }
       },
       onStatsUpdate: (stats) => {
@@ -219,6 +222,22 @@ export const App: React.FC = () => {
       webrtc.close();
     };
   }, []);
+
+  // Session toast line: the running transfer, then its outcome for a few seconds
+  const [transferToast, setTransferToast] = useState<TransferSummary | null>(null);
+  useEffect(() => {
+    const pending = transfers.filter((t) => t.status === 'active' || t.status === 'queued');
+    const current = pending.find((t) => t.status === 'active') ?? pending[0] ?? transfers[transfers.length - 1];
+    setTransferToast(current ? summarizeTransfer(current, pending.length - 1) : null);
+    if (!current || pending.length) return;
+    const timer = setTimeout(() => setTransferToast(null), 6000);
+    return () => clearTimeout(timer);
+  }, [transfers]);
+
+  // Host: shown in the bottom-right session banner (which pops open if it was collapsed)
+  useEffect(() => {
+    if (activeSession?.role === 'host') window.aeroDeskApi?.hostOverlayTransfer(transferToast);
+  }, [transferToast, activeSession?.role]);
 
   // Duration Timer for active session
   useEffect(() => {
@@ -401,6 +420,7 @@ export const App: React.FC = () => {
             <RemoteSessionViewport
               session={activeSession}
               webrtc={webrtcRef.current!}
+              transferToast={transferToast}
               onDisconnect={() => handleDisconnect(true)}
               onOpenFileTransfer={() => setFileTransferOpen(true)}
             />
@@ -435,9 +455,11 @@ export const App: React.FC = () => {
         {fileTransferOpen && webrtcRef.current && (
           <FileTransferModal
             webrtc={webrtcRef.current}
+            transfers={transfers}
             onClose={() => setFileTransferOpen(false)}
           />
         )}
+
       </main>
     </div>
   );

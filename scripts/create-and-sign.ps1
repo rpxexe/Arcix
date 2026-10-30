@@ -15,18 +15,18 @@ $pfxPath = Join-Path $certsDir "aerodesk-codesign.pfx"
 $cerPath = Join-Path $certsDir "AeroDesk-Public.cer"
 
 Write-Host "==========================================================" -ForegroundColor Cyan
-Write-Host "       AeroDesk Windows Code Signing & Security Fix       " -ForegroundColor Cyan
+Write-Host "       Arcix Windows Code Signing & Security Fix       " -ForegroundColor Cyan
 Write-Host "==========================================================" -ForegroundColor Cyan
 
 # 1. Create Self-Signed Code Signing Certificate
 Write-Host "[1/4] Generating local Code Signing Certificate..." -ForegroundColor Yellow
 $cert = New-SelfSignedCertificate `
     -Type CodeSigningCert `
-    -Subject "CN=AeroDesk Development, O=AeroDesk" `
+    -Subject "CN=Arcix Development, O=Arcix" `
     -CertStoreLocation "Cert:\CurrentUser\My" `
     -KeyExportPolicy Exportable `
     -NotAfter (Get-Date).AddYears(5) `
-    -FriendlyName "AeroDesk Code Signing Certificate"
+    -FriendlyName "Arcix Code Signing Certificate"
 
 Write-Host "  Thumbprint: $($cert.Thumbprint)" -ForegroundColor Green
 
@@ -40,10 +40,10 @@ Write-Host "  PFX created: $pfxPath" -ForegroundColor Green
 Write-Host "  CER created: $cerPath" -ForegroundColor Green
 
 # 3. Sign Executables
-Write-Host "[3/4] Signing AeroDesk binaries with Authenticode signature..." -ForegroundColor Yellow
+Write-Host "[3/4] Signing Arcix binaries with Authenticode signature..." -ForegroundColor Yellow
 $binariesToSign = @(
-    (Join-Path $workspaceRoot "release\win-unpacked\AeroDesk.exe"),
-    (Join-Path $workspaceRoot "release\AeroDesk 1.0.0.exe"),
+    (Join-Path $workspaceRoot "release\win-unpacked\Arcix.exe"),
+    (Join-Path $workspaceRoot "release\Arcix 1.0.0.exe"),
     (Join-Path $workspaceRoot "native-input\InputInjector.exe")
 )
 

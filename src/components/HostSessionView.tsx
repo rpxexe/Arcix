@@ -342,7 +342,7 @@ export const HostSessionView: React.FC<HostSessionViewProps> = ({
               color: session.permissions.clipboard ? '#e2e8f0' : 'var(--text-dim)'
             }}>
               <Clipboard size={15} color={session.permissions.clipboard ? '#10b981' : 'var(--text-dim)'} />
-              <span>Clipboard Sync</span>
+              <span>Clipboard Sync: {session.permissions.clipboard ? 'Active' : 'Disabled'}</span>
             </div>
 
             {session.permissions.fileTransfer && (

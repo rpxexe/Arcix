@@ -17,6 +17,7 @@ import {
   RefreshCw
 } from 'lucide-react';
 import { ConnectionState, QualityPreset, RecentSession, SavedDevice, SessionPermissions } from '../types';
+import { LanShareCard } from './LanShareCard';
 
 interface DashboardProps {
   myDeviceId: string;
@@ -104,7 +105,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
         <div>
           <h1 style={{ fontFamily: 'var(--font-heading)', fontSize: 26, fontWeight: 700, color: '#fff' }}>
-            AeroDesk Control Center
+            Arcix Control Center
           </h1>
           <p style={{ color: 'var(--text-muted)', fontSize: 13, marginTop: 4 }}>
             High-Performance Real-Time Screen Sharing & Native Control
@@ -444,6 +445,8 @@ export const Dashboard: React.FC<DashboardProps> = ({
           </form>
         </div>
       </div>
+
+      <LanShareCard />
 
       {/* Recent Sessions & Saved Devices Section */}
       <div className="glass-panel" style={{ padding: 20 }}>
