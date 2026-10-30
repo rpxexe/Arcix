@@ -79,7 +79,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ onClose }) => {
           <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
             <Sliders size={20} color="#06b6d4" />
             <h2 style={{ fontFamily: 'var(--font-heading)', fontSize: 18, fontWeight: 700, color: '#fff' }}>
-              AeroDesk Preferences
+              Arcix Preferences
             </h2>
           </div>
           <button onClick={onClose} className="titlebar-btn" id="close-settings-btn">
@@ -373,10 +373,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ onClose }) => {
             {activeTab === 'theme' && (
               <div>
                 <h3 style={{ fontSize: 15, fontWeight: 600, color: '#fff', marginBottom: 8 }}>
-                  Original Aero Branding
+                  Original Arcix Branding
                 </h3>
                 <p style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 16 }}>
-                  AeroDesk features original high-contrast dark mode with electric cyan and obsidian tones.
+                  Arcix features original high-contrast dark mode with electric cyan and obsidian tones.
                 </p>
                 <div style={{ display: 'flex', gap: 12 }}>
                   <div style={{

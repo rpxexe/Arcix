@@ -12,7 +12,7 @@ function checkExistingServer(port) {
       res.on('end', () => {
         try {
           const parsed = JSON.parse(data);
-          if (parsed && parsed.service && parsed.service.includes('AeroDesk')) {
+          if (parsed && parsed.service && parsed.service.includes('Arcix')) {
             return resolve(true);
           }
         } catch (_) {}
@@ -32,7 +32,7 @@ async function main() {
   const isAlreadyActive = await checkExistingServer(PORT);
   if (isAlreadyActive) {
     console.log(`===============================================`);
-    console.log(` [AeroDesk] Existing Signaling Server detected on :${PORT}`);
+    console.log(` [Arcix] Existing Signaling Server detected on :${PORT}`);
     console.log(` Reusing active instance at ws://localhost:${PORT}`);
     console.log(`===============================================`);
     // Keep process alive so concurrent orchestrators (like concurrently in npm run dev) stay running
@@ -43,7 +43,7 @@ async function main() {
   const server = new SignalingServer(PORT);
   server.start().then((port) => {
     console.log(`===============================================`);
-    console.log(` AeroDesk Signaling Server running on :${port}`);
+    console.log(` Arcix Signaling Server running on :${port}`);
     console.log(` WebRTC Signaling: ws://localhost:${port}`);
     console.log(` Health Check URL: http://localhost:${port}/health`);
     console.log(`===============================================`);

@@ -10,7 +10,7 @@ module.exports = (req, res) => {
 
   res.status(200).json({
     status: 'online',
-    service: 'AeroDesk Serverless Gateway (Vercel)',
+    service: 'Arcix Serverless Gateway (Vercel)',
     version: '1.0.0',
     capabilities: [
       'device_registration',

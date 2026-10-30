@@ -1,6 +1,6 @@
-# AeroDesk — Production-Grade Remote Desktop Application
+# Arcix — Production-Grade Remote Desktop Application
 
-AeroDesk is a high-performance, production-oriented remote desktop application inspired by AnyDesk, featuring original branding, dark glassmorphic aesthetics, and native Windows integrations.
+Arcix is a high-performance, production-oriented remote desktop application inspired by AnyDesk, featuring original branding, dark glassmorphic aesthetics, and native Windows integrations.
 
 Built with **Electron 34**, **React 19**, **TypeScript**, **WebRTC (DTLS-SRTP)**, and a native zero-dependency **Win32 Input Injector** compiled in C#.
 

@@ -1,6 +1,6 @@
 // src/components/Titlebar.tsx
 import React from 'react';
-import { Monitor, Minus, Square, X, ShieldCheck } from 'lucide-react';
+import { Minus, Square, X, ShieldCheck } from 'lucide-react';
 import { ConnectionState } from '../types';
 
 interface TitlebarProps {
@@ -24,20 +24,8 @@ export const Titlebar: React.FC<TitlebarProps> = ({ connectionState, onOpenSetti
   return (
     <header className="app-titlebar" id="app-titlebar">
       <div className="titlebar-brand">
-        <div style={{
-          width: 24,
-          height: 24,
-          borderRadius: 6,
-          background: 'linear-gradient(135deg, #06b6d4 0%, #3b82f6 100%)',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          color: 'white',
-          boxShadow: '0 0 10px rgba(6, 182, 212, 0.5)'
-        }}>
-          <Monitor size={14} strokeWidth={2.5} />
-        </div>
-        <span>AERODESK</span>
+        <img src="./logo.png" alt="" width={26} height={20} style={{ objectFit: 'contain' }} />
+        <span>ARCIX</span>
         <span style={{
           fontSize: 10,
           background: 'rgba(255, 255, 255, 0.08)',

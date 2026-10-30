@@ -1,9 +1,16 @@
 // electron/main.ts
-import { app, BrowserWindow, ipcMain, desktopCapturer, globalShortcut, clipboard, screen } from 'electron';
+import { app, BrowserWindow, ipcMain, desktopCapturer, globalShortcut, clipboard, screen, Menu } from 'electron';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
+import * as crypto from 'crypto';
 import { spawn, ChildProcessWithoutNullStreams } from 'child_process';
+import { setupLanShare, downloadTarget } from './lan-share';
+
+// Renamed from AeroDesk: keep the old profile folder (device ID, saved sessions, unattended password, logs).
+// Must run before anything reads userData. Windows paths are case-insensitive, so this covers dev and packaged.
+const legacyUserData = path.join(app.getPath('appData'), 'AeroDesk');
+if (fs.existsSync(legacyUserData)) app.setPath('userData', legacyUserData);
 
 let mainWindow: BrowserWindow | null = null;
 let overlayWindow: BrowserWindow | null = null;
@@ -38,11 +45,21 @@ function startNativeInputInjector() {
     inputInjectorProcess = spawn(exePath);
     console.log(`[InputInjector] Started native process: ${exePath}`);
 
+    // Output is newline-delimited JSON; a chunk can hold several lines or end mid-line
+    let pending = '';
     inputInjectorProcess.stdout.on('data', (data) => {
-      const line = data.toString().trim();
-      if (line.includes('"status":"ready"')) {
-        inputInjectorReady = true;
-        console.log('[InputInjector] Native input injection service is ready');
+      const lines = (pending + data.toString()).split('\n');
+      pending = lines.pop() || '';
+      for (const line of lines) {
+        if (line.includes('"status":"ready"')) {
+          inputInjectorReady = true;
+          console.log('[InputInjector] Native input injection service is ready');
+        } else if (line.includes('"event":"key"')) {
+          // System shortcut (Win, Alt+Tab, ...) captured by the keyboard hook while a viewer session is focused
+          try {
+            mainWindow?.webContents.send('native-input:captured-key', JSON.parse(line));
+          } catch (_) {}
+        }
       }
     });
 
@@ -81,6 +98,8 @@ function sendCommandToInjector(cmd: any): Promise<{ status: string; message?: st
   });
 }
 
+const DEV_ICON = path.join(__dirname, '..', 'build', 'icon.ico');
+
 function createMainWindow() {
   mainWindow = new BrowserWindow({
     width: 1200,
@@ -89,6 +108,8 @@ function createMainWindow() {
     minHeight: 640,
     frame: false, // Frameless for rich custom AnyDesk titlebar
     backgroundColor: '#0d1117',
+    // Taskbar icon in dev; a packaged build uses the icon electron-builder embeds from build/icon.ico
+    icon: fs.existsSync(DEV_ICON) ? DEV_ICON : undefined,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -113,6 +134,9 @@ function createMainWindow() {
     }
   }
 
+  // A file dropped outside a drop zone would navigate the app to it and drop the session
+  mainWindow.webContents.on('will-navigate', (event) => event.preventDefault());
+
   mainWindow.on('closed', () => {
     mainWindow = null;
     if (overlayWindow) {
@@ -126,7 +150,19 @@ function createMainWindow() {
 const escapeHtml = (s: unknown) => String(s ?? '').replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
 
 const OVERLAY_EXPANDED = { width: 520, height: 64 };
+const OVERLAY_WITH_TRANSFER = { width: 520, height: 122 };
 const OVERLAY_COLLAPSED = { width: 52, height: 52 };
+
+// Overlay state: a transfer pops a collapsed banner open, and it folds back once the message is gone
+let overlayCollapsed = false;
+let overlayAutoExpanded = false;
+let overlayTransfer: unknown = null;
+
+function refreshOverlay() {
+  if (!overlayWindow || overlayWindow.isDestroyed()) return;
+  overlayWindow.setBounds(overlayBounds(overlayCollapsed ? OVERLAY_COLLAPSED : overlayTransfer ? OVERLAY_WITH_TRANSFER : OVERLAY_EXPANDED));
+  overlayWindow.webContents.send('host-overlay:transfer', { transfer: overlayTransfer, collapsed: overlayCollapsed });
+}
 
 // Anchor the overlay to the bottom-right of the primary work area (above the taskbar)
 function overlayBounds(size: { width: number; height: number }) {
@@ -138,6 +174,9 @@ function createHostOverlayWindow(info: { peerId: string; peerName: string; permi
   if (overlayWindow) {
     overlayWindow.close();
   }
+  overlayCollapsed = false;
+  overlayAutoExpanded = false;
+  overlayTransfer = null;
 
   // Floating banner on bottom-right of host screen above taskbar; collapsible to a pulsing dot
   overlayWindow = new BrowserWindow({
@@ -228,6 +267,28 @@ function createHostOverlayWindow(info: { peerId: string; peerName: string; permi
         .pill .dot { width: 14px; height: 14px; }
         body.collapsed .panel { display: none; }
         body.collapsed .pill { display: flex; }
+        .transfer {
+          display: none;
+          box-sizing: border-box;
+          margin-top: 6px;
+          height: 52px;
+          padding: 8px 14px;
+          background: rgba(15, 23, 42, 0.92);
+          border: 1px solid rgba(6, 182, 212, 0.4);
+          border-radius: 12px;
+          font-size: 12px;
+        }
+        body.has-transfer:not(.collapsed) .transfer { display: block; }
+        .t-row { display: flex; gap: 10px; align-items: baseline; white-space: nowrap; }
+        .t-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; font-weight: 600; }
+        .t-pct { flex: none; font-variant-numeric: tabular-nums; color: #22d3ee; font-weight: 600; }
+        .t-bar { height: 4px; margin: 5px 0 4px; background: rgba(255, 255, 255, 0.12); border-radius: 2px; overflow: hidden; }
+        .t-fill { height: 100%; width: 0; background: #06b6d4; transition: width 0.15s linear; }
+        .t-detail { color: #94a3b8; font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .transfer.done .t-fill { background: #10b981; }
+        .transfer.done .t-pct { color: #10b981; }
+        .transfer.error .t-fill { background: #f43f5e; }
+        .transfer.error .t-pct { color: #f43f5e; }
       </style>
     </head>
     <body>
@@ -246,6 +307,27 @@ function createHostOverlayWindow(info: { peerId: string; peerName: string; permi
         </div>
       </div>
       <button class="pill" title="Active remote session: ${escapeHtml(info.peerId)} — click to expand" aria-label="Expand session banner" onclick="window.aeroDeskApi.hostOverlayAction('expand'); document.body.classList.remove('collapsed')"><span class="dot"></span></button>
+      <div class="transfer" role="status" aria-live="polite">
+        <div class="t-row"><span class="t-title"></span><span class="t-pct"></span></div>
+        <div class="t-bar"><div class="t-fill"></div></div>
+        <div class="t-detail"></div>
+      </div>
+      <script>
+        // File names come from the remote peer: only ever assigned through textContent
+        const box = document.querySelector('.transfer');
+        window.aeroDeskApi.onHostOverlayTransfer(({ transfer, collapsed }) => {
+          document.body.classList.toggle('collapsed', collapsed);
+          document.body.classList.toggle('has-transfer', !!transfer);
+          if (!transfer) return;
+          box.className = 'transfer ' + (transfer.status === 'done' ? 'done' : transfer.status === 'error' || transfer.status === 'cancelled' ? 'error' : '');
+          box.querySelector('.t-title').textContent = transfer.title;
+          box.querySelector('.t-title').title = transfer.title;
+          box.querySelector('.t-pct').textContent = transfer.status === 'done' ? '\\u2713' : transfer.percent + '%';
+          box.querySelector('.t-fill').style.width = transfer.percent + '%';
+          box.querySelector('.t-detail').textContent = transfer.detail;
+          box.querySelector('.t-detail').title = transfer.detail;
+        });
+      </script>
     </body>
     </html>
   `;
@@ -309,8 +391,24 @@ ipcMain.handle('host-overlay:show', (_event, info) => {
 ipcMain.on('host-overlay:action', (_event, action: string) => {
   if (action === 'revoke') mainWindow?.webContents.send('session:emergency-revoke');
   else if (action === 'disconnect') mainWindow?.webContents.send('session:host-disconnect');
-  else if (action === 'collapse') overlayWindow?.setBounds(overlayBounds(OVERLAY_COLLAPSED));
-  else if (action === 'expand') overlayWindow?.setBounds(overlayBounds(OVERLAY_EXPANDED));
+  else if (action === 'collapse' || action === 'expand') {
+    overlayCollapsed = action === 'collapse';
+    overlayAutoExpanded = false; // the user chose; don't fold it back on them
+    refreshOverlay();
+  }
+});
+
+// Current file transfer for the banner (null clears it)
+ipcMain.on('host-overlay:transfer', (_event, transfer: unknown) => {
+  if (transfer && !overlayTransfer && overlayCollapsed) {
+    overlayCollapsed = false;
+    overlayAutoExpanded = true;
+  } else if (!transfer && overlayAutoExpanded) {
+    overlayCollapsed = true;
+    overlayAutoExpanded = false;
+  }
+  overlayTransfer = transfer || null;
+  refreshOverlay();
 });
 
 ipcMain.handle('host-overlay:hide', () => {
@@ -330,16 +428,47 @@ ipcMain.handle('clipboard:write-text', (_event, text: string) => {
   return true;
 });
 
-ipcMain.handle('file:save-received', (_event, fileName: string, data: Uint8Array) => {
-  // Name comes from the remote peer: strip any path and reserved characters before touching disk
-  const safe = path.basename(String(fileName)).replace(/[<>:"/\\|?*\x00-\x1f]/g, '_').replace(/^\.+/, '') || 'received-file';
-  if (data.byteLength > 100 * 1024 * 1024) throw new Error('File exceeds 100 MB limit');
-  const dir = app.getPath('downloads');
-  const ext = path.extname(safe);
-  let target = path.join(dir, safe);
-  for (let i = 1; fs.existsSync(target); i++) target = path.join(dir, `${path.basename(safe, ext)} (${i})${ext}`);
-  fs.writeFileSync(target, data, { flag: 'wx' });
+// Received files stream into a .part file in Downloads and are renamed only once complete,
+// so an interrupted transfer never leaves a truncated file under the real name
+const receivingFiles = new Map<string, { fileName: string; partPath: string; handle: fs.promises.FileHandle }>();
+
+ipcMain.handle('file:receive-start', async (_event, fileName: string) => {
+  const id = crypto.randomUUID();
+  // Name comes from the remote peer: downloadTarget strips any path and reserved characters
+  const partPath = `${downloadTarget(fileName)}.${id.slice(0, 8)}.part`;
+  receivingFiles.set(id, { fileName, partPath, handle: await fs.promises.open(partPath, 'wx') });
+  return id;
+});
+
+ipcMain.handle('file:receive-chunk', async (_event, id: string, data: Uint8Array) => {
+  const file = receivingFiles.get(id);
+  if (!file) throw new Error('Transfer was cancelled');
+  await file.handle.write(data);
+});
+
+ipcMain.handle('file:receive-finish', async (_event, id: string) => {
+  const file = receivingFiles.get(id);
+  if (!file) throw new Error('Transfer was cancelled');
+  receivingFiles.delete(id);
+  await file.handle.close();
+  const target = downloadTarget(file.fileName);
+  await fs.promises.rename(file.partPath, target);
   return target;
+});
+
+async function abortReceive(id: string) {
+  const file = receivingFiles.get(id);
+  if (!file) return;
+  receivingFiles.delete(id);
+  await file.handle.close().catch(() => {});
+  await fs.promises.rm(file.partPath, { force: true });
+}
+
+ipcMain.handle('file:receive-abort', (_event, id: string) => abortReceive(id));
+
+// Viewer session focus: let the injector's keyboard hook capture Win/Alt+Tab/etc. for this window only
+ipcMain.handle('native-input:key-capture', (_event, enabled: boolean) => {
+  return sendCommandToInjector({ action: 'key_capture', enabled: !!enabled, pid: process.pid });
 });
 
 ipcMain.handle('audit-log:append', (_event, entry) => {
@@ -387,7 +516,11 @@ ipcMain.on('window:maximize', () => {
 ipcMain.on('window:close', () => mainWindow?.close());
 
 app.whenReady().then(() => {
+  // The default menu's hidden accelerators (Ctrl+R reload, Ctrl+W close, Ctrl+Shift+I, zoom...) would fire
+  // locally instead of reaching the remote PC, reloading or closing the app mid-session
+  Menu.setApplicationMenu(null);
   startNativeInputInjector();
+  setupLanShare();
   createMainWindow();
 
   // Register Global Emergency Disconnect Shortcut (Ctrl+Alt+Shift+Escape)
@@ -408,6 +541,7 @@ app.whenReady().then(() => {
 
 app.on('will-quit', () => {
   globalShortcut.unregisterAll();
+  receivingFiles.forEach((_file, id) => abortReceive(id));
   if (inputInjectorProcess) {
     try {
       inputInjectorProcess.stdin.write('exit\n');

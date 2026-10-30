@@ -14,14 +14,30 @@ import {
   Check,
   AlertCircle,
   ChevronUp,
-  ChevronDown
+  ChevronDown,
+  Eye,
+  EyeOff
 } from 'lucide-react';
 import { ActiveSessionData, QualityPreset, RemoteInputEvent } from '../types';
 import { WebRTCManager } from '../services/webrtc-manager';
+import { TransferSummary } from './TransferList';
+
+// Left/right modifiers by physical key: keyCode reports 16/17/18 for both sides, and the host needs
+// the sided VK to send right Ctrl/Alt (AltGr) with the extended flag
+const SIDED_VK: Record<string, number> = {
+  ShiftLeft: 0xa0, ShiftRight: 0xa1, ControlLeft: 0xa2, ControlRight: 0xa3,
+  AltLeft: 0xa4, AltRight: 0xa5, MetaLeft: 0x5b, MetaRight: 0x5c
+};
+
+// Cursor drawn locally by the OS (hardware cursor, zero latency); the host hides its own while we control
+const LOCAL_CURSOR = `url("data:image/svg+xml,${encodeURIComponent(
+  '<svg xmlns="http://www.w3.org/2000/svg" width="20" height="22"><path d="M2 1.5v16l4.2-4 3 6.8 2.6-1.1-3-6.7h5.8z" fill="#fff" stroke="#000" stroke-width="1.3" stroke-linejoin="round"/></svg>'
+)}") 2 1, default`;
 
 interface RemoteSessionViewportProps {
   session: ActiveSessionData;
   webrtc: WebRTCManager;
+  transferToast?: TransferSummary | null;
   onDisconnect: () => void;
   onOpenFileTransfer: () => void;
 }
@@ -29,6 +45,7 @@ interface RemoteSessionViewportProps {
 export const RemoteSessionViewport: React.FC<RemoteSessionViewportProps> = ({
   session,
   webrtc,
+  transferToast,
   onDisconnect,
   onOpenFileTransfer
 }) => {
@@ -43,10 +60,17 @@ export const RemoteSessionViewport: React.FC<RemoteSessionViewportProps> = ({
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [fitToWindow, setFitToWindow] = useState(true);
   const [isInputEnabled, setIsInputEnabled] = useState(session.permissions.input);
+  const [showRemoteCursor, setShowRemoteCursor] = useState(true);
   const [clipboardStatus, setClipboardStatus] = useState<string | null>(null);
 
   // Floating ribbon minimized/expanded
   const [ribbonOpen, setRibbonOpen] = useState(true);
+
+  // A new transfer opens a collapsed ribbon so its progress line is visible
+  const hasTransfer = !!transferToast;
+  useEffect(() => {
+    if (hasTransfer) setRibbonOpen(true);
+  }, [hasTransfer]);
 
   // Bind video element to remote stream with instant fallback and autoplay
   useEffect(() => {
@@ -72,6 +96,11 @@ export const RemoteSessionViewport: React.FC<RemoteSessionViewportProps> = ({
     });
   }, [webrtc]);
 
+  useEffect(() => {
+    // When showRemoteCursor is enabled, host cursor remains visible and captured in the video stream
+    webrtc.setRemoteCursorHidden(!showRemoteCursor);
+  }, [webrtc, showRemoteCursor]);
+
   // Fullscreen change listener
   useEffect(() => {
     const handleFullscreenChange = () => {
@@ -90,24 +119,30 @@ export const RemoteSessionViewport: React.FC<RemoteSessionViewportProps> = ({
     }
   };
 
+  // Map a pointer position into host screen pixels, excluding object-fit letterbox bars (centered by default)
+  const toHostPoint = (e: React.MouseEvent<HTMLVideoElement>) => {
+    const video = videoRef.current!;
+    const rect = video.getBoundingClientRect();
+    const videoWidth = video.videoWidth || 1920;
+    const videoHeight = video.videoHeight || 1080;
+    const scale = Math.min(rect.width / videoWidth, rect.height / videoHeight);
+    const offsetX = (rect.width - videoWidth * scale) / 2;
+    const offsetY = (rect.height - videoHeight * scale) / 2;
+    return {
+      x: Math.min(videoWidth - 1, Math.max(0, Math.round((e.clientX - rect.left - offsetX) / scale))),
+      y: Math.min(videoHeight - 1, Math.max(0, Math.round((e.clientY - rect.top - offsetY) / scale))),
+      screen_w: videoWidth,
+      screen_h: videoHeight
+    };
+  };
+
   // Mouse Input Tracking
   const handleMouseMove = (e: React.MouseEvent<HTMLVideoElement>) => {
     if (!isInputEnabled || session.role !== 'viewer' || !videoRef.current) return;
 
-    const rect = videoRef.current.getBoundingClientRect();
-    const videoWidth = videoRef.current.videoWidth || 1920;
-    const videoHeight = videoRef.current.videoHeight || 1080;
-
-    // Map into the rendered picture, excluding object-fit letterbox bars (centered by default)
-    const scale = Math.min(rect.width / videoWidth, rect.height / videoHeight);
-    const offsetX = (rect.width - videoWidth * scale) / 2;
-    const offsetY = (rect.height - videoHeight * scale) / 2;
-    const hostX = Math.min(videoWidth - 1, Math.max(0, Math.round((e.clientX - rect.left - offsetX) / scale)));
-    const hostY = Math.min(videoHeight - 1, Math.max(0, Math.round((e.clientY - rect.top - offsetY) / scale)));
-
     // Leading-edge throttle to ~60 moves/s: the first move goes out immediately (no added latency),
     // moves within the next 16 ms collapse into one. A timer, not rAF: rAF pauses while the window isn't painted.
-    pendingMoveRef.current = { type: 'mouse_move', x: hostX, y: hostY, screen_w: videoWidth, screen_h: videoHeight };
+    pendingMoveRef.current = { type: 'mouse_move', ...toHostPoint(e) };
     if (moveFrameRef.current === null) {
       flushMouseMove();
       moveFrameRef.current = window.setTimeout(() => {
@@ -124,25 +159,28 @@ export const RemoteSessionViewport: React.FC<RemoteSessionViewportProps> = ({
     }
   };
 
+  // Clicks carry their position (reliable channel) so they land exactly where clicked even if a move was lost
   const handleMouseDown = (e: React.MouseEvent<HTMLVideoElement>) => {
-    if (!isInputEnabled || session.role !== 'viewer') return;
+    if (!isInputEnabled || session.role !== 'viewer' || !videoRef.current) return;
     const button = e.button === 2 ? 'right' : e.button === 1 ? 'middle' : 'left';
-    flushMouseMove();
+    pendingMoveRef.current = null;
     heldButtonsRef.current.add(button);
     webrtc.sendInputEvent({
       type: 'mouse_down',
-      button
+      button,
+      ...toHostPoint(e)
     });
   };
 
   const handleMouseUp = (e: React.MouseEvent<HTMLVideoElement>) => {
-    if (!isInputEnabled || session.role !== 'viewer') return;
+    if (!isInputEnabled || session.role !== 'viewer' || !videoRef.current) return;
     const button = e.button === 2 ? 'right' : e.button === 1 ? 'middle' : 'left';
-    flushMouseMove();
+    pendingMoveRef.current = null;
     heldButtonsRef.current.delete(button);
     webrtc.sendInputEvent({
       type: 'mouse_up',
-      button
+      button,
+      ...toHostPoint(e)
     });
   };
 
@@ -172,10 +210,14 @@ export const RemoteSessionViewport: React.FC<RemoteSessionViewportProps> = ({
         return;
       }
 
-      heldKeysRef.current.add(e.keyCode);
+      const vk = SIDED_VK[e.code] ?? e.keyCode;
+      if (!vk || vk === 229) return; // 229: IME composition in progress, no real key
+      // Keep the key out of this window: Tab/Space/Enter would otherwise hit ribbon buttons, F-keys/Alt act locally
+      e.preventDefault();
+      heldKeysRef.current.add(vk);
       webrtc.sendInputEvent({
         type: 'key_down',
-        vk: e.keyCode
+        vk
       });
     };
 
@@ -183,12 +225,26 @@ export const RemoteSessionViewport: React.FC<RemoteSessionViewportProps> = ({
       if (!isInputEnabled || session.role !== 'viewer') return;
       if (['INPUT', 'TEXTAREA'].includes((e.target as HTMLElement)?.tagName)) return;
 
-      heldKeysRef.current.delete(e.keyCode);
+      const vk = SIDED_VK[e.code] ?? e.keyCode;
+      if (!vk || vk === 229) return;
+      e.preventDefault();
+      heldKeysRef.current.delete(vk);
       webrtc.sendInputEvent({
         type: 'key_up',
-        vk: e.keyCode
+        vk
       });
     };
+
+    // Win, Alt+Tab, Ctrl+Esc, PrintScreen never reach the page; the native hook captures them for this window
+    const api = window.aeroDeskApi;
+    const capturing = isInputEnabled && session.role === 'viewer';
+    if (capturing) api?.setKeyCapture(true);
+    const cleanupCaptured = api?.onCapturedKey(({ vk, up }) => {
+      if (!capturing) return;
+      if (up) heldKeysRef.current.delete(vk);
+      else heldKeysRef.current.add(vk);
+      webrtc.sendInputEvent({ type: up ? 'key_up' : 'key_down', vk });
+    });
 
     const releaseAll = () => {
       heldKeysRef.current.forEach((vk) => webrtc.sendInputEvent({ type: 'key_up', vk }));
@@ -202,6 +258,8 @@ export const RemoteSessionViewport: React.FC<RemoteSessionViewportProps> = ({
     window.addEventListener('blur', releaseAll);
     return () => {
       releaseAll();
+      cleanupCaptured?.();
+      if (capturing) api?.setKeyCapture(false);
       window.removeEventListener('keydown', handleKeyDown);
       window.removeEventListener('keyup', handleKeyUp);
       window.removeEventListener('blur', releaseAll);
@@ -330,6 +388,29 @@ export const RemoteSessionViewport: React.FC<RemoteSessionViewportProps> = ({
           >
             <MousePointer size={14} />
             {isInputEnabled ? 'Control ON' : 'Control OFF'}
+          </button>
+
+          {/* Toggle Remote Cursor Visibility */}
+          <button
+            onClick={() => setShowRemoteCursor(!showRemoteCursor)}
+            id="toggle-remote-cursor-btn"
+            title={showRemoteCursor ? 'Remote Cursor: Visible (Click to Hide)' : 'Remote Cursor: Hidden (Click to Show)'}
+            style={{
+              background: showRemoteCursor ? 'rgba(6, 182, 212, 0.2)' : 'rgba(255, 255, 255, 0.05)',
+              color: showRemoteCursor ? '#38bdf8' : 'var(--text-dim)',
+              border: showRemoteCursor ? '1px solid #06b6d4' : '1px solid var(--border-subtle)',
+              padding: '6px 10px',
+              borderRadius: 6,
+              cursor: 'pointer',
+              display: 'flex',
+              alignItems: 'center',
+              gap: 4,
+              fontSize: 12,
+              fontWeight: 600
+            }}
+          >
+            {showRemoteCursor ? <Eye size={14} /> : <EyeOff size={14} />}
+            {showRemoteCursor ? 'Cursor ON' : 'Cursor OFF'}
           </button>
 
           {/* Sync Clipboard */}
@@ -484,6 +565,55 @@ export const RemoteSessionViewport: React.FC<RemoteSessionViewportProps> = ({
         </div>
       )}
 
+      {/* File transfer line, attached under the control ribbon */}
+      {ribbonOpen && transferToast && (
+        <div
+          id="session-transfer-status"
+          role="status"
+          aria-live="polite"
+          style={{
+            position: 'absolute',
+            top: 62,
+            left: '50%',
+            transform: 'translateX(-50%)',
+            zIndex: 100,
+            width: 420,
+            maxWidth: 'calc(100% - 32px)',
+            background: 'rgba(15, 20, 32, 0.88)',
+            backdropFilter: 'blur(16px)',
+            border: '1px solid var(--border-subtle)',
+            borderRadius: 10,
+            padding: '8px 12px',
+            boxShadow: '0 8px 30px rgba(0, 0, 0, 0.5)',
+            fontSize: 12
+          }}
+        >
+          <div style={{ display: 'flex', gap: 10, alignItems: 'baseline' }}>
+            <span style={{ flex: 1, minWidth: 0, color: '#fff', fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={transferToast.title}>
+              {transferToast.title}
+            </span>
+            <span style={{
+              fontWeight: 600,
+              fontVariantNumeric: 'tabular-nums',
+              color: transferToast.status === 'done' ? '#10b981' : transferToast.status === 'active' || transferToast.status === 'queued' ? '#06b6d4' : '#f43f5e'
+            }}>
+              {transferToast.status === 'done' ? <Check size={13} /> : `${transferToast.percent}%`}
+            </span>
+          </div>
+          <div style={{ height: 4, margin: '5px 0 4px', background: 'rgba(255, 255, 255, 0.1)', borderRadius: 2, overflow: 'hidden' }}>
+            <div style={{
+              height: '100%',
+              width: `${transferToast.percent}%`,
+              background: transferToast.status === 'done' ? '#10b981' : transferToast.status === 'active' || transferToast.status === 'queued' ? '#06b6d4' : '#f43f5e',
+              transition: 'width 0.15s linear'
+            }} />
+          </div>
+          <div style={{ fontSize: 11, color: 'var(--text-dim)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={transferToast.detail}>
+            {transferToast.detail}
+          </div>
+        </div>
+      )}
+
       {/* Main Remote Desktop Canvas / Video */}
       <video
         ref={videoRef}
@@ -500,8 +630,8 @@ export const RemoteSessionViewport: React.FC<RemoteSessionViewportProps> = ({
           width: fitToWindow ? '100%' : 'auto',
           height: fitToWindow ? '100%' : 'auto',
           objectFit: fitToWindow ? 'contain' : 'none',
-          // While controlling, the host's cursor in the video is the cursor; hide ours so only one shows
-          cursor: isInputEnabled ? 'none' : 'default',
+          // When remote cursor is shown, video stream contains the remote host cursor; otherwise use local hardware cursor
+          cursor: isInputEnabled ? (showRemoteCursor ? 'default' : LOCAL_CURSOR) : 'default',
           backgroundColor: '#05070a'
         }}
       />

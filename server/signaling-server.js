@@ -23,7 +23,7 @@ class SignalingServer {
           res.writeHead(200);
           res.end(JSON.stringify({
             status: 'online',
-            service: 'AeroDesk Signaling Hub',
+            service: 'Arcix Signaling Hub',
             activeDevices: this.devices.size,
             uptime: process.uptime(),
             timestamp: new Date().toISOString()
@@ -41,6 +41,7 @@ class SignalingServer {
         let registeredDeviceId = null;
 
         ws.on('message', (messageRaw) => {
+          ws.isAlive = true;
           try {
             const data = JSON.parse(messageRaw.toString());
             this.handleMessage(ws, data, clientIp, (id) => {
@@ -51,9 +52,17 @@ class SignalingServer {
           }
         });
 
+        // Heartbeat: a socket that stops answering (sleep, network change) is terminated instead of
+        // staying "online" forever with nobody behind it
+        ws.isAlive = true;
+        ws.on('pong', () => { ws.isAlive = true; });
+
         ws.on('close', () => {
           if (registeredDeviceId) {
             const device = this.devices.get(registeredDeviceId);
+            // After a reconnect the device lives on a newer socket; this old socket closing late
+            // must not remove it (that left online devices reported as offline)
+            if (!device || device.ws !== ws) return;
             if (device && device.activeSessionWith) {
               const peer = this.devices.get(device.activeSessionWith);
               if (peer && peer.ws.readyState === WebSocket.OPEN) {
@@ -76,21 +85,29 @@ class SignalingServer {
         // Send welcome banner
         this.send(ws, {
           type: 'welcome',
-          message: 'Connected to AeroDesk Signaling Gateway',
+          message: 'Connected to Arcix Signaling Gateway',
           version: '1.0.0'
         });
       });
 
+      this.heartbeatTimer = setInterval(() => {
+        this.wss.clients.forEach((ws) => {
+          if (!ws.isAlive) return ws.terminate();
+          ws.isAlive = false;
+          ws.ping();
+        });
+      }, 30000);
+
       this.httpServer.on('error', (err) => {
         if (err.code === 'EADDRINUSE') {
-          console.warn(`[AeroDesk Signaling Server] Warning: Port ${this.port} is already in use.`);
+          console.warn(`[Arcix Signaling Server] Warning: Port ${this.port} is already in use.`);
         } else {
-          console.error(`[AeroDesk Signaling Server] HTTP Server Error:`, err);
+          console.error(`[Arcix Signaling Server] HTTP Server Error:`, err);
         }
       });
 
       this.httpServer.listen(this.port, () => {
-        console.log(`[AeroDesk Signaling Server] Listening on port ${this.port}`);
+        console.log(`[Arcix Signaling Server] Listening on port ${this.port}`);
         resolve(this.port);
       });
     });
@@ -141,7 +158,10 @@ class SignalingServer {
     if (deviceId && this.devices.has(deviceId)) {
       const existing = this.devices.get(deviceId);
       if (token && existing.token === token) {
+        const previous = existing.ws;
         existing.ws = ws;
+        // Drop the half-dead socket this device reconnected from (its close is ignored above)
+        if (previous !== ws) previous.terminate();
         existing.deviceName = msg.deviceName || existing.deviceName;
         setDeviceId(deviceId);
         this.send(ws, {
@@ -347,6 +367,7 @@ class SignalingServer {
   }
 
   stop() {
+    clearInterval(this.heartbeatTimer);
     return new Promise((resolve) => {
       if (this.wss) {
         this.wss.close(() => {

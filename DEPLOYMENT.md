@@ -1,16 +1,16 @@
-# AeroDesk Deployment Guide
+# Arcix Deployment Guide
 
-Complete step-by-step instructions for deploying the **AeroDesk** remote desktop application across cloud platforms and packaging client executables.
+Complete step-by-step instructions for deploying the **Arcix** remote desktop application across cloud platforms and packaging client executables.
 
 ---
 
 ## 📐 Architecture Overview
 
-AeroDesk separates its cloud infrastructure into two distinct services:
+Arcix separates its cloud infrastructure into two distinct services:
 
 ```mermaid
 graph LR
-    subgraph Clients["AeroDesk Desktop & Web Clients"]
+    subgraph Clients["Arcix Desktop & Web Clients"]
         Viewer["Remote Viewer (PC / Web)"]
         Host["Host Desktop (Windows)"]
     end
@@ -50,7 +50,7 @@ graph LR
 
 1. **Vercel**: Deploy the web dashboard and serverless endpoints with `npx vercel --prod`.
 2. **Signaling Server**: Deploy `server/` to Render (free) using [`render.yaml`](render.yaml) or Docker to keep persistent WebSockets active.
-3. **Desktop App**: Run `npm run package:exe` to generate the portable Windows `AeroDesk 1.0.0.exe`.
+3. **Desktop App**: Run `npm run package:exe` to generate the portable Windows `Arcix 1.0.0.exe`.
 
 ---
 
@@ -167,7 +167,7 @@ You can also change the signaling server directly inside the running application
 
 ## 4. Building the Windows Executable (`.exe`)
 
-AeroDesk packages into a single standalone portable `.exe` that runs on any Windows 10 or 11 system without installation.
+Arcix packages into a single standalone portable `.exe` that runs on any Windows 10 or 11 system without installation.
 
 ### Packaging Command:
 ```powershell
@@ -175,10 +175,10 @@ npm run package:exe
 ```
 
 ### Output Artifacts:
-- **Portable Executable**: [`release\AeroDesk 1.0.0.exe`](release/AeroDesk%201.0.0.exe) (~82 MB)
+- **Portable Executable**: [`release\Arcix 1.0.0.exe`](release/Arcix%201.0.0.exe) (~82 MB)
   - Contains Electron 34, React UI, WebRTC media engine, and the native Win32 `InputInjector.exe`.
   - Can be copied to a USB drive or distributed to clients directly.
-- **Unpacked Folder**: [`release\win-unpacked\AeroDesk.exe`](release/win-unpacked/AeroDesk.exe)
+- **Unpacked Folder**: [`release\win-unpacked\Arcix.exe`](release/win-unpacked/Arcix.exe)
 
 ### Windows Code-Signing (Optional for Production):
 To eliminate the Windows Defender SmartScreen "Unknown Publisher" prompt:

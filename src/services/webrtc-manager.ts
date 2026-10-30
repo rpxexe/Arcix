@@ -1,10 +1,23 @@
 // src/services/webrtc-manager.ts
-import { QualityPreset, RemoteInputEvent, SessionPermissions } from '../types';
+import { FileTransferItem, QualityPreset, RemoteInputEvent, SessionPermissions } from '../types';
 import { SignalingClient } from './signaling-client';
 
 const CHUNK_SIZE = 64 * 1024; // binary file chunks; well under Chromium's 256 KB message limit
+const READ_BLOCK = 1024 * 1024; // sender reads the file in 1 MB slices, never the whole file
 const BUFFER_HIGH_WATER = 4 * 1024 * 1024;
-const MAX_FILE_BYTES = 100 * 1024 * 1024;
+const DISK_FLUSH_BYTES = 4 * 1024 * 1024; // receiver writes to disk in 4 MB batches
+const MAX_FILE_BYTES = 10 * 1024 * 1024 * 1024;
+const PROGRESS_INTERVAL_MS = 100;
+
+const concatParts = (parts: ArrayBuffer[], size: number) => {
+  const out = new Uint8Array(size);
+  let offset = 0;
+  for (const p of parts) {
+    out.set(new Uint8Array(p), offset);
+    offset += p.byteLength;
+  }
+  return out;
+};
 
 export interface WebRTCStats {
   rttMs: number;
@@ -16,8 +29,7 @@ export type WebRTCEvents = {
   onRemoteStream?: (stream: MediaStream) => void;
   onStatsUpdate?: (stats: WebRTCStats) => void;
   onDataChannelReady?: () => void;
-  onFileTransferProgress?: (fileName: string, progressPercent: number) => void;
-  onFileTransferComplete?: (fileName: string, blob: Blob) => void;
+  onTransferUpdate?: (transfer: FileTransferItem) => void;
   onClipboardReceived?: (text: string) => void;
   onConnectionStateChange?: (state: RTCPeerConnectionState) => void;
 };
@@ -25,7 +37,13 @@ export type WebRTCEvents = {
 export class WebRTCManager {
   private pc: RTCPeerConnection | null = null;
   private inputChannel: RTCDataChannel | null = null;
+  private mouseChannel: RTCDataChannel | null = null;
   private controlChannel: RTCDataChannel | null = null;
+  private moveSeq = 0;
+  private lastAppliedMoveSeq = -1;
+  // Viewer renders its own cursor and asks the host to hide the system cursor while it has control
+  private remoteCursorHidden = false;
+  private hostCursorHidden = false;
   private localStream: MediaStream | null = null;
   private remoteStream: MediaStream | null = null;
 
@@ -39,18 +57,29 @@ export class WebRTCManager {
   private lastBytes: number = 0;
   private lastStatsTimestamp: number = 0;
 
-  // File reception state
-  private incomingFile: {
-    fileName: string;
-    fileSize: number;
-    receivedBytes: number;
+  // File transfers: one outgoing and one incoming file at a time on the ordered control channel
+  private transfers = new Map<string, FileTransferItem>();
+  private lastProgressEmit = new Map<string, number>();
+  private sendQueue: { item: FileTransferItem; file: File }[] = [];
+  private sending = false;
+  private incoming: {
+    item: FileTransferItem;
     parts: ArrayBuffer[];
+    bufferedBytes: number;
+    handle: Promise<string>;
+    writes: Promise<unknown>;
   } | null = null;
 
   // ICE candidates arriving before remote description is set
   private pendingCandidates: RTCIceCandidateInit[] = [];
   private hostReady: Promise<void> | null = null;
   private quality: QualityPreset = 'balanced';
+
+  // Automatic bidirectional clipboard synchronization
+  private clipboardPollTimer: any = null;
+  private lastLocalClipboard: string = '';
+  private lastReceivedClipboard: string = '';
+  private boundOnWindowFocus: (() => void) | null = null;
 
   constructor(signaling: SignalingClient) {
     this.signaling = signaling;
@@ -66,6 +95,105 @@ export class WebRTCManager {
 
   public setPermissions(perms: SessionPermissions) {
     this.permissions = perms;
+    this.applyHostCursor();
+    if (this.permissions.clipboard && this.controlChannel?.readyState === 'open') {
+      this.startClipboardSync();
+    } else if (!this.permissions.clipboard) {
+      this.stopClipboardSync();
+    }
+  }
+
+  private async readSystemClipboard(): Promise<string> {
+    try {
+      if (window.aeroDeskApi?.readClipboard) {
+        return (await window.aeroDeskApi.readClipboard()) || '';
+      } else if (typeof navigator !== 'undefined' && navigator.clipboard?.readText) {
+        return (await navigator.clipboard.readText()) || '';
+      }
+    } catch (_) {}
+    return '';
+  }
+
+  private async writeSystemClipboard(text: string): Promise<boolean> {
+    try {
+      if (window.aeroDeskApi?.writeClipboard) {
+        await window.aeroDeskApi.writeClipboard(text);
+        return true;
+      } else if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text);
+        return true;
+      }
+    } catch (err) {
+      console.warn('[Clipboard Sync] Failed to write to system clipboard:', err);
+    }
+    return false;
+  }
+
+  public async checkAndSyncClipboard(): Promise<boolean> {
+    if (!this.permissions.clipboard || !this.controlChannel || this.controlChannel.readyState !== 'open') {
+      return false;
+    }
+    const currentText = await this.readSystemClipboard();
+    if (
+      currentText &&
+      currentText !== this.lastLocalClipboard &&
+      currentText !== this.lastReceivedClipboard &&
+      currentText.length <= 1024 * 1024
+    ) {
+      this.lastLocalClipboard = currentText;
+      return this.sendClipboardText(currentText);
+    }
+    return false;
+  }
+
+  private startClipboardSync() {
+    this.stopClipboardSync();
+    if (!this.permissions.clipboard) return;
+
+    // Prime local clipboard cache so existing contents are not pushed unless newly copied
+    this.readSystemClipboard().then((text) => {
+      this.lastLocalClipboard = text;
+    });
+
+    // 500ms background polling interval for active bidirectional sync
+    this.clipboardPollTimer = setInterval(() => {
+      this.checkAndSyncClipboard();
+    }, 500);
+
+    // Immediate sync on window focus
+    if (typeof window !== 'undefined') {
+      this.boundOnWindowFocus = () => {
+        this.checkAndSyncClipboard();
+      };
+      window.addEventListener('focus', this.boundOnWindowFocus);
+    }
+  }
+
+  private stopClipboardSync() {
+    if (this.clipboardPollTimer) {
+      clearInterval(this.clipboardPollTimer);
+      this.clipboardPollTimer = null;
+    }
+    if (this.boundOnWindowFocus && typeof window !== 'undefined') {
+      window.removeEventListener('focus', this.boundOnWindowFocus);
+      this.boundOnWindowFocus = null;
+    }
+  }
+
+  // Host: hide the system cursor only while the viewer controls input and draws its own cursor
+  private applyHostCursor() {
+    const hide = this.role === 'host' && !!this.pc && this.remoteCursorHidden && this.permissions.input;
+    if (hide === this.hostCursorHidden) return;
+    this.hostCursorHidden = hide;
+    window.aeroDeskApi?.injectNativeInput({ action: hide ? 'cursor_hide' : 'cursor_show' });
+  }
+
+  // Viewer: tell the host whether we render the cursor locally (sent again when the channel opens)
+  public setRemoteCursorHidden(hidden: boolean) {
+    this.remoteCursorHidden = hidden;
+    if (this.controlChannel?.readyState === 'open') {
+      this.controlChannel.send(JSON.stringify({ type: 'remote_cursor', hidden }));
+    }
   }
 
   public async startAsHost(viewerId: string, permissions: SessionPermissions, sourceId?: string): Promise<void> {
@@ -112,6 +240,14 @@ export class WebRTCManager {
       ordered: true
     });
     this.setupDataChannel(this.inputChannel);
+
+    // Mouse moves: unordered, never retransmitted. A lost move is superseded by the next one instead of
+    // stalling everything behind it (head-of-line blocking was the main source of cursor lag under loss)
+    this.mouseChannel = this.pc!.createDataChannel('mouse', {
+      ordered: false,
+      maxRetransmits: 0
+    });
+    this.setupDataChannel(this.mouseChannel);
 
     // Reliable ordered control channel
     this.controlChannel = this.pc!.createDataChannel('control', {
@@ -219,14 +355,27 @@ export class WebRTCManager {
   private setupDataChannel(channel: RTCDataChannel) {
     if (channel.label === 'input') {
       this.inputChannel = channel;
+    } else if (channel.label === 'mouse') {
+      this.mouseChannel = channel;
     } else if (channel.label === 'control') {
       this.controlChannel = channel;
+      // close() detaches the channel first, so a late close event from an ended session is ignored
+      channel.onclose = () => {
+        this.stopClipboardSync();
+        if (this.controlChannel === channel) this.failTransfers('Connection lost');
+      };
     }
 
     channel.onopen = () => {
       // Viewer picks quality, host owns the encoder: tell it once the control channel is up
-      if (channel.label === 'control' && this.role === 'viewer') {
-        channel.send(JSON.stringify({ type: 'quality_preset', preset: this.quality }));
+      if (channel.label === 'control') {
+        if (this.role === 'viewer') {
+          channel.send(JSON.stringify({ type: 'quality_preset', preset: this.quality }));
+          channel.send(JSON.stringify({ type: 'remote_cursor', hidden: this.remoteCursorHidden }));
+        }
+        if (this.permissions.clipboard) {
+          this.startClipboardSync();
+        }
       }
       console.log(`[DataChannel] Channel '${channel.label}' opened`);
       this.events.onDataChannelReady?.();
@@ -243,7 +392,7 @@ export class WebRTCManager {
   }
 
   private handleChannelMessage(label: string, data: any) {
-    if (label === 'input' && this.role === 'host') {
+    if ((label === 'input' || label === 'mouse') && this.role === 'host') {
       // Check if input control is allowed
       if (!this.permissions.input) {
         return; // Host revoked or rejected input control
@@ -251,6 +400,10 @@ export class WebRTCManager {
 
       try {
         const inputEvent = JSON.parse(data) as RemoteInputEvent;
+        if (inputEvent.seq !== undefined) {
+          if (inputEvent.seq <= this.lastAppliedMoveSeq) return; // arrived out of order, a newer move already applied
+          this.lastAppliedMoveSeq = inputEvent.seq;
+        }
         // Forward directly to native Windows input injector
         if (window.aeroDeskApi) {
           window.aeroDeskApi.injectNativeInput({
@@ -265,54 +418,39 @@ export class WebRTCManager {
             text: inputEvent.text
           });
         }
+        // If user performed Copy/Cut (Ctrl+C / Ctrl+X) on the host, trigger an immediate clipboard check
+        if (inputEvent.type === 'key_up' && (inputEvent.vk === 0x43 || inputEvent.vk === 0x58)) {
+          setTimeout(() => this.checkAndSyncClipboard(), 150);
+        }
       } catch (err) {
         console.warn('[Input Dispatch] Invalid input packet', err);
       }
     } else if (label === 'control') {
       // Binary frames are file chunks; the channel is ordered + reliable, so arrival order is file order
       if (typeof data !== 'string') {
-        const file = this.incomingFile;
-        if (!file) return;
-        file.parts.push(data);
-        file.receivedBytes += data.byteLength;
-        if (file.receivedBytes > file.fileSize) {
-          console.warn('[File Transfer] Peer sent more bytes than announced; dropping transfer');
-          this.incomingFile = null;
-          return;
-        }
-        this.events.onFileTransferProgress?.(file.fileName, Math.round((file.receivedBytes / file.fileSize) * 100));
-        if (file.receivedBytes === file.fileSize) {
-          this.incomingFile = null;
-          this.events.onFileTransferComplete?.(file.fileName, new Blob(file.parts));
-        }
+        this.receiveChunk(data);
         return;
       }
       try {
         const msg = JSON.parse(data);
         if (msg.type === 'quality_preset' && this.role === 'host' && ['speed', 'balanced', 'quality'].includes(msg.preset)) {
           this.applyQualityPreset(msg.preset);
+        } else if (msg.type === 'remote_cursor' && this.role === 'host') {
+          this.remoteCursorHidden = msg.hidden === true;
+          this.applyHostCursor();
         } else if (msg.type === 'clipboard_sync' && this.permissions.clipboard) {
-          if (window.aeroDeskApi) {
-            window.aeroDeskApi.writeClipboard(msg.text);
+          const text = typeof msg.text === 'string' ? msg.text : '';
+          if (text && text !== this.lastLocalClipboard) {
+            this.lastReceivedClipboard = text;
+            this.lastLocalClipboard = text;
+            this.writeSystemClipboard(text);
           }
-          this.events.onClipboardReceived?.(msg.text);
+          this.events.onClipboardReceived?.(text);
         } else if (msg.type === 'file_meta' && this.permissions.fileTransfer) {
-          // Peer-supplied size: reject anything invalid or over the 100 MB cap
-          if (!Number.isInteger(msg.fileSize) || msg.fileSize < 0 || msg.fileSize > MAX_FILE_BYTES) {
-            console.warn('[File Transfer] Rejected invalid file metadata');
-            return;
-          }
-          if (msg.fileSize === 0) {
-            this.events.onFileTransferComplete?.(String(msg.fileName), new Blob([]));
-            return;
-          }
-          this.incomingFile = {
-            fileName: String(msg.fileName),
-            fileSize: msg.fileSize,
-            receivedBytes: 0,
-            parts: []
-          };
-          this.events.onFileTransferProgress?.(this.incomingFile.fileName, 0);
+          this.startReceive(msg);
+        } else if (msg.type === 'file_cancel') {
+          const item = this.transfers.get(String(msg.id));
+          if (item && (item.status === 'active' || item.status === 'queued')) this.endTransfer(item, 'cancelled', 'Cancelled by the other side');
         }
       } catch (err) {
         console.warn('[Control Message Error]', err);
@@ -320,14 +458,140 @@ export class WebRTCManager {
     }
   }
 
+  private emitTransfer(item: FileTransferItem, force = true) {
+    const now = performance.now();
+    // Chunks arrive hundreds of times a second; cap progress re-renders at ~10/s
+    if (!force && now - (this.lastProgressEmit.get(item.id) || 0) < PROGRESS_INTERVAL_MS) return;
+    this.lastProgressEmit.set(item.id, now);
+    this.events.onTransferUpdate?.({ ...item });
+  }
+
+  // Moves a transfer to a final state once; cleans up a partially received file
+  private endTransfer(item: FileTransferItem, status: 'done' | 'error' | 'cancelled', error?: string) {
+    if (item.status === 'done' || item.status === 'error' || item.status === 'cancelled') return;
+    item.status = status;
+    item.error = error;
+    if (this.incoming?.item === item) {
+      const { handle } = this.incoming;
+      this.incoming = null;
+      if (status !== 'done') handle.then((h) => window.aeroDeskApi?.receiveFileAbort(h)).catch(() => {});
+    }
+    this.lastProgressEmit.delete(item.id);
+    this.emitTransfer(item);
+  }
+
+  private failTransfers(reason: string) {
+    this.sendQueue = [];
+    this.transfers.forEach((item) => this.endTransfer(item, 'error', reason));
+  }
+
+  private startReceive(msg: any) {
+    const api = window.aeroDeskApi;
+    const id = String(msg.id || '');
+    // Peer-supplied metadata: reject anything invalid or over the cap
+    if (!id || this.transfers.has(id) || !Number.isInteger(msg.fileSize) || msg.fileSize < 0 || msg.fileSize > MAX_FILE_BYTES) {
+      console.warn('[File Transfer] Rejected invalid file metadata');
+      return;
+    }
+    if (this.incoming) this.endTransfer(this.incoming.item, 'error', 'Interrupted by a new transfer');
+
+    const item: FileTransferItem = {
+      id,
+      direction: 'receive',
+      fileName: String(msg.fileName),
+      totalBytes: msg.fileSize,
+      transferredBytes: 0,
+      startedAt: Date.now(),
+      status: 'active'
+    };
+    this.transfers.set(id, item);
+    if (!api) {
+      this.emitTransfer(item);
+      this.rejectIncoming(item, 'Receiving files requires the desktop app');
+      return;
+    }
+    const handle = api.receiveFileStart(item.fileName);
+    this.incoming = { item, parts: [], bufferedBytes: 0, handle, writes: handle };
+    this.emitTransfer(item);
+    if (item.totalBytes === 0) this.flushIncoming(true);
+  }
+
+  private receiveChunk(data: ArrayBuffer) {
+    const incoming = this.incoming;
+    if (!incoming) return; // chunks of a transfer we already cancelled
+    const { item } = incoming;
+    incoming.parts.push(data);
+    incoming.bufferedBytes += data.byteLength;
+    item.transferredBytes += data.byteLength;
+    if (item.transferredBytes > item.totalBytes) {
+      this.rejectIncoming(item, 'Peer sent more data than announced');
+      return;
+    }
+    const complete = item.transferredBytes === item.totalBytes;
+    if (complete || incoming.bufferedBytes >= DISK_FLUSH_BYTES) this.flushIncoming(complete);
+    if (!complete) this.emitTransfer(item, false);
+  }
+
+  // Appends buffered chunks to the .part file in order; on the last batch, finalizes it into Downloads
+  private flushIncoming(complete: boolean) {
+    const incoming = this.incoming!;
+    const api = window.aeroDeskApi!;
+    const { item, handle } = incoming;
+    const data = concatParts(incoming.parts, incoming.bufferedBytes);
+    incoming.parts = [];
+    incoming.bufferedBytes = 0;
+    // The sender starts the next file as soon as this one is sent, possibly before it is on disk
+    if (complete) this.incoming = null;
+    incoming.writes = incoming.writes
+      .then(() => handle)
+      .then((h) => (data.byteLength ? api.receiveFileChunk(h, data) : null))
+      .then(() => {
+        if (!complete) return null;
+        if (item.status !== 'active') throw new Error('Cancelled');
+        return handle.then((h) => api.receiveFileFinish(h));
+      })
+      .then((savedPath) => {
+        if (!complete) return;
+        item.savedPath = savedPath || undefined;
+        this.endTransfer(item, 'done');
+      })
+      .catch((err) => {
+        handle.then((h) => api.receiveFileAbort(h)).catch(() => {});
+        if (item.status === 'active') this.rejectIncoming(item, err?.message || 'Could not save file');
+      });
+  }
+
+  // Receiver-side failure or cancel: stop the sender too
+  private rejectIncoming(item: FileTransferItem, reason: string, status: 'error' | 'cancelled' = 'error') {
+    if (this.controlChannel?.readyState === 'open') {
+      this.controlChannel.send(JSON.stringify({ type: 'file_cancel', id: item.id }));
+    }
+    this.endTransfer(item, status, reason);
+  }
+
+  public cancelTransfer(id: string) {
+    const item = this.transfers.get(id);
+    if (!item || (item.status !== 'active' && item.status !== 'queued')) return;
+    if (item.direction === 'receive') {
+      this.rejectIncoming(item, 'Cancelled', 'cancelled');
+    } else {
+      // The send loop sees the status change and tells the receiver
+      this.endTransfer(item, 'cancelled', 'Cancelled');
+    }
+  }
+
   public sendInputEvent(event: RemoteInputEvent) {
-    if (this.role === 'viewer' && this.inputChannel && this.inputChannel.readyState === 'open') {
+    if (this.role !== 'viewer') return;
+    if (event.type === 'mouse_move' && this.mouseChannel?.readyState === 'open') {
+      this.mouseChannel.send(JSON.stringify({ ...event, seq: this.moveSeq++ }));
+    } else if (this.inputChannel && this.inputChannel.readyState === 'open') {
       this.inputChannel.send(JSON.stringify(event));
     }
   }
 
   public sendClipboardText(text: string): boolean {
     if (this.permissions.clipboard && this.controlChannel && this.controlChannel.readyState === 'open') {
+      this.lastLocalClipboard = text;
       this.controlChannel.send(JSON.stringify({
         type: 'clipboard_sync',
         text
@@ -337,11 +601,50 @@ export class WebRTCManager {
     return false;
   }
 
-  public async sendFile(file: File) {
+  // Queues files; they are sent one after another and reported through onTransferUpdate
+  public sendFiles(files: File[]) {
     const channel = this.controlChannel;
     if (!this.permissions.fileTransfer || !channel || channel.readyState !== 'open') {
       throw new Error('File transfer is not permitted or control channel is closed');
     }
+    for (const file of files) {
+      const item: FileTransferItem = {
+        id: crypto.randomUUID(),
+        direction: 'send',
+        fileName: file.name,
+        totalBytes: file.size,
+        transferredBytes: 0,
+        startedAt: Date.now(),
+        status: 'queued'
+      };
+      this.transfers.set(item.id, item);
+      this.sendQueue.push({ item, file });
+      this.emitTransfer(item);
+    }
+    this.pumpSendQueue();
+  }
+
+  private async pumpSendQueue() {
+    if (this.sending) return;
+    this.sending = true;
+    try {
+      while (this.sendQueue.length > 0) {
+        const { item, file } = this.sendQueue.shift()!;
+        if (item.status !== 'queued') continue; // cancelled while waiting
+        try {
+          await this.sendOne(item, file);
+        } catch (err: any) {
+          this.endTransfer(item, 'error', err?.message || 'File transfer failed');
+        }
+      }
+    } finally {
+      this.sending = false;
+    }
+  }
+
+  private async sendOne(item: FileTransferItem, file: File) {
+    const channel = this.controlChannel;
+    if (!channel || channel.readyState !== 'open') throw new Error('Connection lost');
 
     // Wait until the outgoing buffer drops to `threshold`; event-driven since timers get throttled in background windows
     const drain = (threshold: number) => new Promise<void>((resolve) => {
@@ -350,27 +653,43 @@ export class WebRTCManager {
       channel.addEventListener('bufferedamountlow', () => resolve(), { once: true });
       channel.addEventListener('close', () => resolve(), { once: true }); // send() then throws instead of hanging
     });
+    const stopped = () => item.status !== 'active';
 
+    item.status = 'active';
+    item.startedAt = Date.now();
+    this.emitTransfer(item);
     channel.send(JSON.stringify({
       type: 'file_meta',
+      id: item.id,
       fileName: file.name,
       fileSize: file.size
     }));
 
-    const buffer = await file.arrayBuffer();
-    for (let offset = 0; offset < file.size; offset += CHUNK_SIZE) {
-      // Backpressure: send() throws once the outgoing buffer overflows on large files
-      await drain(BUFFER_HIGH_WATER);
-      channel.send(buffer.slice(offset, offset + CHUNK_SIZE));
-      // Progress counts bytes that actually left this machine, not bytes queued
-      const delivered = Math.min(file.size, offset + CHUNK_SIZE) - channel.bufferedAmount;
-      this.events.onFileTransferProgress?.(file.name, Math.max(0, Math.min(99, Math.floor((delivered / file.size) * 100))));
+    for (let block = 0; block < file.size && !stopped(); block += READ_BLOCK) {
+      const buffer = await file.slice(block, block + READ_BLOCK).arrayBuffer();
+      for (let offset = 0; offset < buffer.byteLength && !stopped(); offset += CHUNK_SIZE) {
+        // Backpressure: send() throws once the outgoing buffer overflows on large files
+        await drain(BUFFER_HIGH_WATER);
+        if (stopped()) break;
+        channel.send(buffer.slice(offset, offset + CHUNK_SIZE));
+        // Progress counts bytes that actually left this machine, not bytes queued
+        const queued = Math.min(file.size, block + offset + CHUNK_SIZE);
+        item.transferredBytes = Math.max(0, queued - channel.bufferedAmount);
+        this.emitTransfer(item, false);
+      }
     }
+    // Status changes underneath this loop (cancelTransfer / peer cancel), so widen TS's narrowed 'active'
+    if ((item.status as FileTransferItem['status']) === 'cancelled') {
+      if (channel.readyState === 'open') channel.send(JSON.stringify({ type: 'file_cancel', id: item.id }));
+      return;
+    }
+    if (stopped()) return; // receiver cancelled or connection failed; already reported
     await drain(0);
     if (channel.readyState !== 'open') {
       throw new Error('Connection closed before the file was fully sent');
     }
-    this.events.onFileTransferProgress?.(file.name, 100);
+    item.transferredBytes = file.size;
+    this.endTransfer(item, 'done');
   }
 
   private async acquireScreenStream(preferredSourceId?: string): Promise<MediaStream> {
@@ -393,7 +712,10 @@ export class WebRTCManager {
                   maxWidth: 1920,
                   maxHeight: 1080,
                   maxFrameRate: 60
-                }
+                },
+                optional: [
+                  { cursor: 'always' }
+                ]
               }
             });
           } catch (resErr) {
@@ -404,7 +726,10 @@ export class WebRTCManager {
                 mandatory: {
                   chromeMediaSource: 'desktop',
                   chromeMediaSourceId: targetSource.id
-                }
+                },
+                optional: [
+                  { cursor: 'always' }
+                ]
               }
             });
           }
@@ -416,7 +741,10 @@ export class WebRTCManager {
 
     // Standard fallback (getDisplayMedia)
     return await navigator.mediaDevices.getDisplayMedia({
-      video: { frameRate: { ideal: 60 } },
+      video: {
+        cursor: 'always',
+        frameRate: { ideal: 60 }
+      },
       audio: false
     });
   }
@@ -493,7 +821,10 @@ export class WebRTCManager {
   }
 
   public close() {
+    this.stopClipboardSync();
     this.stopStatsMonitoring();
+    this.failTransfers('Session ended');
+    this.transfers.clear();
     if (this.localStream) {
       this.localStream.getTracks().forEach(t => t.stop());
       this.localStream = null;
@@ -502,6 +833,12 @@ export class WebRTCManager {
       this.inputChannel.close();
       this.inputChannel = null;
     }
+    if (this.mouseChannel) {
+      this.mouseChannel.close();
+      this.mouseChannel = null;
+    }
+    this.moveSeq = 0;
+    this.lastAppliedMoveSeq = -1;
     if (this.controlChannel) {
       this.controlChannel.close();
       this.controlChannel = null;
@@ -510,6 +847,8 @@ export class WebRTCManager {
       this.pc.close();
       this.pc = null;
     }
+    this.remoteCursorHidden = false;
+    this.applyHostCursor(); // restores the host's system cursor
     this.remoteStream = null;
     this.pendingCandidates = [];
     this.hostReady = null;

@@ -69,6 +69,20 @@ export interface RemoteInputEvent {
   delta_y?: number;
   vk?: number;
   text?: string;
+  // Mouse moves travel on an unordered channel; the host drops any move older than the last one applied
+  seq?: number;
+}
+
+export interface FileTransferItem {
+  id: string;
+  direction: 'send' | 'receive';
+  fileName: string;
+  totalBytes: number;
+  transferredBytes: number;
+  startedAt: number;
+  status: 'queued' | 'active' | 'done' | 'error' | 'cancelled';
+  error?: string;
+  savedPath?: string;
 }
 
 export interface FileTransferMeta {

@@ -23,6 +23,7 @@ export class SignalingClient {
   private handlers: SignalingEventHandler = {};
   private reconnectTimer: any = null;
   private pingInterval: any = null;
+  private lastServerMessage = 0;
   private state: ConnectionState = 'disconnected';
 
   public myDeviceId: string = '';
@@ -92,6 +93,7 @@ export class SignalingClient {
   }
 
   private handleIncomingMessage(msg: any) {
+    this.lastServerMessage = Date.now(); // any message, including 'pong', proves the link is alive
     switch (msg.type) {
       case 'registered':
         this.myDeviceId = msg.deviceId;
@@ -248,7 +250,23 @@ export class SignalingClient {
 
   private startPing() {
     this.stopPing();
+    this.lastServerMessage = Date.now();
     this.pingInterval = setInterval(() => {
+      // A silently dropped connection still reads OPEN here; without this the app shows
+      // "Ready to Connect" while the server no longer knows it, and callers get "offline"
+      if (Date.now() - this.lastServerMessage > 45000) {
+        console.warn('[Signaling] No reply from server, reconnecting');
+        const dead = this.ws;
+        this.ws = null;
+        if (dead) {
+          dead.onclose = null;
+          dead.close();
+        }
+        this.stopPing();
+        this.setState('disconnected');
+        this.scheduleReconnect();
+        return;
+      }
       this.send({ type: 'ping' });
     }, 15000);
   }
